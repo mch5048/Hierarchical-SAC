@@ -17,7 +17,6 @@ import cv2
 from cv_bridge import CvBridge, CvBridgeError
 from string import Template
 import time
-from ddpg.msg import GoalObs
 from geometry_msgs.msg import (
     PoseStamped,
     Pose,
@@ -108,8 +107,11 @@ STATE_DIM = 24        # MDP
 GRIPPER_UPPER = 0.041667
 GRIPPER_LOWER = 0.0
 
+TERM_THRES = 50
+SUC_THRES = 50
+
 class robotEnv(): 
-    def __init__(self, max_steps=700, isdagger=False, isPOMDP=False, isGripper=False, isReal=False, isCartesian=True, train_indicator=0):
+    def __init__(self, max_steps=700, isdagger=False, isPOMDP=False, isGripper=False, isCartesian=True, train_indicator=1):
         """An implementation of OpenAI-Gym style robot reacher environment
         applicable to HER and HIRO.
         TODO: add method that receives target object's pose as state
@@ -125,7 +127,7 @@ class robotEnv():
         self.train_indicator = train_indicator # 1: Train 0:Test
         self.isdagger = isdagger
         self.isPOMDP = isPOMDP
-        self.isReal = isReal
+        self.isReal = not train_indicator
         self.isGripper = isGripper
         self.isCartesian = isCartesian
         self.reached = False
@@ -149,7 +151,7 @@ class robotEnv():
         self.reward = 0
         self.reward_rescale = 1.0
         self.reward_type = 'sparse'
-
+        self.destPos = np.array([0.5, 0.0, 0.0])
         self.joint_cmd_msg = JointCommand()
 
 
@@ -191,6 +193,8 @@ class robotEnv():
         self.tf_listenser = tf.TransformListener()
         self.ee_trans = list()
         self.ee_rot = list()
+        self.termination_count = 0
+        self.success_count = 0
         rospy.on_shutdown(self._delete_gazebo_models)
 
 
@@ -281,15 +285,15 @@ class robotEnv():
             gripper_force = np.array(self._limb.endpoint_effort()['force'])
             gripper_torque = np.array(self._limb.endpoint_effort()['torque'])
         """
-        _endpt_pose = msg.pose
         if self.isReal:
             try:
-                (self.ee_trans, self.ee_rot) = self.tf_listenser.lookupTransform('/base','/right_gripper_tip', rospy.Time(0))
-                rate.sleep()
+                (self.endpt_ori, self.endpt_pos) = self.tf_listenser.lookupTransform('/base','/right_gripper_tip', rospy.Time(0))
             except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
                 pass
-        self.endpt_ori = [_endpt_pose.orientation.x, _endpt_pose.orientation.y, _endpt_pose.orientation.z, _endpt_pose.orientation.w]
-        self.endpt_pos = [_endpt_pose.position.x, _endpt_pose.position.y, _endpt_pose.position.z]
+        else:
+            _endpt_pose = msg.pose
+            self.endpt_ori = [_endpt_pose.orientation.x, _endpt_pose.orientation.y, _endpt_pose.orientation.z, _endpt_pose.orientation.w]
+            self.endpt_pos = [_endpt_pose.position.x, _endpt_pose.position.y, _endpt_pose.position.z]
 
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
@@ -311,7 +315,7 @@ class robotEnv():
         if not self.isReal:
             return self.endpt_ori + self.endpt_pos
         else:
-            return self.ee_rot + self.ee_trans
+            return self.ee_rot + self.ee_trrans
 
     def get_target_obj_obs(self):
         """Return target object pose. Experimentally supports only position info."""
@@ -371,6 +375,13 @@ class robotEnv():
         curDist = self._get_dist()
         if not self.isReal:
             self.reward = self._compute_reward()
+            if self.reward==1.0:
+                self.success_count +=1
+                if self.success_count == SUC_THRES:
+                    print ('======================================================')
+                    print ('Succeeds current Episode : SUCCEEDED')
+                    print ('======================================================')
+                    self.done = True
             if self._check_for_termination():
                 print ('======================================================')
                 print ('Terminates current Episode : OUT OF BOUNDARY')
@@ -446,13 +457,13 @@ class robotEnv():
         """
         block_pose = self.gen_block_pose()
         self._delete_target_block()
-        self._load_target_block(block_pose=block_pose)
+        self._delete_table()
         # object_state_srv = rospy.ServiceProxy('/gazebo/get_model_state', GetModelState)
         # # object_state = object_state_srv("block", "world")
         # object_state = object_state_srv("block", "base")
         # self._obj_pose = np.array([object_state.pose.position.x, object_state.pose.position.y, object_state.pose.position.z])       
         # print object_state.pose.position.z
-        _des_goal = self._reset_desired_goal(goal_pose=block_pose)
+        _des_goal = self._reset_desired_goal(goal_pose=block_pose, block_pose=block_pose)
 
         starting_joint_angles['right_j0'] = np.random.uniform(-0.05, 0.05)
         starting_joint_angles['right_j1'] = np.random.uniform(-0.95, -0.85)
@@ -468,6 +479,7 @@ class robotEnv():
         _ = self.move_to_start(starting_joint_angles)
         print("Moving the right arm to start pose...")
         self.gripper_open()
+
         return _des_goal
 
     def _guarded_move_to_joint_position(self, joint_angles, timeout=5.0):
@@ -608,7 +620,7 @@ class robotEnv():
             self.ikVelPub.publish(_pose)
             self._check_traj(_pose, idx)
 
-    def _reset_desired_goal(self, goal_pose=Pose()):
+    def _reset_desired_goal(self, goal_pose=Pose(), block_pose=Pose()):
         """Manipulate the robot to the randomly generated target object.
             the orientation of the e,e, should be varied while satisfying the position.
             TODO: Use Sawyer velocity controller class 
@@ -624,17 +636,21 @@ class robotEnv():
         quat = _rot.GetQuaternion() # -> x, y, z, w
 
         start_pose = goal_pose
-        start_pose.position.z += 0.15
+        start_pose.position.z += 0.00
         start_pose.orientation = overhead_orientation
         # start_pose.orientation.x = quat[0]
         # start_pose.orientation.y = quat[1]
         # start_pose.orientation.z = quat[2]
         # start_pose.orientation.w = quat[3]
         
-        self.servo_vel(start_pose)
-        if rospy.has_param('vel_calc'):
-            rospy.logwarn('Initialized pose.')
-            rospy.delete_param('vel_calc')
+        # self.servo_vel(start_pose)
+        self._servo_to_pose(start_pose)
+
+        self._load_table()
+        self._load_target_block(block_pose=block_pose) 
+        # if rospy.has_param('vel_calc'):
+        #     rospy.logwarn('Initialized pose.')
+        #     rospy.delete_param('vel_calc')
         rospy.sleep(0.5)
         self.gripper_close()
         return self.get_desired_goals()
@@ -649,6 +665,40 @@ class robotEnv():
             resp_delete = delete_model("block")
         except rospy.ServiceException, e:
             rospy.loginfo("Delete Model service call failed: {0}".format(e))
+
+    def _delete_table(self):
+        # This will be called on ROS Exit, deleting Gazebo models
+        # Do not wait for the Gazebo Delete Model service, since
+        # Gazebo should already be running. If the service is not
+        # available since Gazebo has been killed, it is fine to error out
+        try:
+            delete_model = rospy.ServiceProxy('/gazebo/delete_model', DeleteModel)
+            resp_delete = delete_model("cafe_table")
+        except rospy.ServiceException as e:
+            print("Delete Model service call failed: {0}".format(e))
+
+    def _load_table(self):
+        # This will be called on ROS Exit, deleting Gazebo models
+        # Do not wait for the Gazebo Delete Model service, since
+        # Gazebo should already be running. If the service is not
+        # available since Gazebo has been killed, it is fine to error out
+        # Get Models' Path
+        table_pose=Pose(position=Point(x=0.75, y=0.0, z=0.0))
+        table_reference_frame="world"
+        model_path = rospkg.RosPack().get_path('sawyer_sim_examples')+"/models/"
+        # Load Table SDF
+        table_xml = ''
+        with open (model_path + "cafe_table/model.sdf", "r") as table_file:
+            table_xml=table_file.read().replace('\n', '')
+
+        # Spawn Table SDF
+        rospy.wait_for_service('/gazebo/spawn_sdf_model')
+        try:
+            spawn_sdf = rospy.ServiceProxy('/gazebo/spawn_sdf_model', SpawnModel)
+            resp_sdf1 = spawn_sdf("cafe_table", table_xml, "/",
+                                table_pose, table_reference_frame)
+        except rospy.ServiceException, e:
+            rospy.logerr("Spawn SDF service call failed: {0}".format(e)) 
 
     def _delete_gazebo_models(self):
         # This will be called on ROS Exit, deleting Gazebo models
@@ -747,17 +797,34 @@ class robotEnv():
                                 table_pose, table_reference_frame)
         except rospy.ServiceException, e:
             rospy.logerr("Spawn SDF service call failed: {0}".format(e))    
+
     def _check_for_termination(self):
         """
         Check if the agent has reached undesirable state. If so, terminate the episode early. 
         """
-        # raise NotImplementedError()
-        return False
+        if self.endpt_pos[0] < 0.34 or abs(self.endpt_pos[1])>0.33 or self.endpt_pos[2]<-0.1 or self.endpt_pos[2]>0.75 or self.endpt_pos[0] > 0.95:
+            self.termination_count +=1
+            if self.termination_count == TERM_THRES:
+                self.termination_count =0
+                return True
+            else:
+                return False    
+
     def _check_for_success(self):
         """
         Check if the agent has reached undesirable state. If so, terminate the episode early. 
         """
-        raise NotImplementedError()
+        curDist = self.getDist()
+        # curDist = 1
+        # print self.successCount
+        if curDist < self.distance_threshold/1.0:
+            self.successCount +=1
+            self.reward +=10
+        if self.successCount == 400:
+            self.successCount =0
+            return True
+        else:
+            return False
 
     def _compute_reward(self):
         """Computes shaped/sparse reward for each episode.
@@ -820,6 +887,46 @@ class robotEnv():
         except Exception as e:            
             rospy.logerr('Error on calling service: %s',str(e))
         return obj_pose
+
+    def _servo_to_pose(self, pose, time=4.0, steps=400.0):
+        ''' An *incredibly simple* linearly-interpolated Cartesian move '''
+        # r = rospy.Rate(1/(time/steps)) # Defaults to 100Hz command rate
+        r = rospy.Rate(100.0) # Defaults to 100Hz command rate
+        current_pose = self._limb.endpoint_pose()
+        ik_delta = Pose()
+        ik_delta.position.x = (current_pose['position'].x - pose.position.x) / steps
+        ik_delta.position.y = (current_pose['position'].y - pose.position.y) / steps
+        ik_delta.position.z = (current_pose['position'].z - pose.position.z) / steps
+        ik_delta.orientation.x = (current_pose['orientation'].x - pose.orientation.x) / steps
+        ik_delta.orientation.y = (current_pose['orientation'].y - pose.orientation.y) / steps
+        ik_delta.orientation.z = (current_pose['orientation'].z - pose.orientation.z) / steps
+        ik_delta.orientation.w = (current_pose['orientation'].w - pose.orientation.w) / steps
+        for d in range(int(steps), -1, -1):
+            if rospy.is_shutdown():
+                return
+            ik_step = Pose()
+            ik_step.position.x = d*ik_delta.position.x + pose.position.x
+            ik_step.position.y = d*ik_delta.position.y + pose.position.y
+            ik_step.position.z = d*ik_delta.position.z + pose.position.z
+            ik_step.orientation.x = d*ik_delta.orientation.x + pose.orientation.x
+            ik_step.orientation.y = d*ik_delta.orientation.y + pose.orientation.y
+            ik_step.orientation.z = d*ik_delta.orientation.z + pose.orientation.z
+            ik_step.orientation.w = d*ik_delta.orientation.w + pose.orientation.w
+            joint_angles = self._limb.ik_request(ik_step, self._tip_name)
+            if joint_angles:
+                self._limb.set_joint_positions(joint_angles)
+            else:
+                rospy.logerr("No Joint Angles provided for move_to_joint_positions. Staying put.")
+            r.sleep()
+
+
+
+
+
+
+
+
+
 
     def close(self):        
         rospy.signal_shutdown("done")

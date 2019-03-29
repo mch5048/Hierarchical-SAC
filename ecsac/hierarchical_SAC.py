@@ -23,6 +23,7 @@ import os
 from her import Her_sampler
 from OU import OU
 from Gaussian import Gaussian
+from collections import OrderedDict
 
 import wandb
 wandb.init(project="hiro-ecsac")
@@ -30,15 +31,16 @@ wandb.init(project="hiro-ecsac")
 
 path = '/home/irobot/catkin_ws/src/ddpg/scripts/'
 log_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp'
-SAC_PI_MODEL_SAVEDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/trained/ecsac_trained'
-SAC_VF_MODEL_SAVEDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/vf_trained/ecsac_trained'
-SAC_QF1_MODEL_SAVEDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/qf1_trained/ecsac_trained'
-SAC_QF2_MODEL_SAVEDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/qf2_trained/ecsac_trained'
+# manager weight save dirs
+MAN_PI_MODEL_SAVEDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/man_pi_trained/'
+MAN_QF1_MODEL_SAVEDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/man_qf1_trained/'
+MAN_QF2_MODEL_SAVEDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/man_qf2_trained/'
 
-SAC_PI_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/trained/'
-SAC_VF_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/vf_trained/'
-SAC_QF1_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/qf1_trained/'
-SAC_QF2_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/qf2_trained/'
+# controller weight save dirs
+CTRL_PI_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/ctrl_pi_trained/'
+CTRL_VF_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/ctrl_vf_trained/'
+CTRL_QF1_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/ctrl_qf1_trained/'
+CTRL_QF2_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/ctrl_qf2_trained/'
 
 # we exploit off-policy demo data with replay buffer
 DEMO_DIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp'
@@ -174,9 +176,9 @@ class ManagerReplayBuffer(ReplayBuffer):
         """
         super(ManagerReplayBuffer, self).store(manager=True, *args, **kwargs)
         
-        self.stt_seq_buf[self.ptr] = stt_seq
-        self.obs_seq_buf[self.ptr] = obs_seq
-        self.act_seq_buf[self.ptr] = act_seq
+        self.stt_seq_buf[self.ptr] = np.array(stt_seq)
+        self.obs_seq_buf[self.ptr] = np.array(obs_seq)
+        self.act_seq_buf[self.ptr] = np.array(act_seq)
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
 
@@ -286,6 +288,7 @@ def sample_action(action_dim):
     # high = high if self.dtype.kind == 'f' else self.high.astype('int64') + 1
     return np.random.uniform(low=low, high=high, size=action_dim).astype('float32')
 
+    
 def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     """
     Implementation of EC-SAC for Sawyer's reach & grasp
@@ -330,17 +333,18 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # hiro specific params
     manager_propose_freq = 10
     train_manager_freq= 10
-    manager_noise = 0.2 # for target policy smoothing.
-    manager_noise_clip = 0.5 # for target policy smoothing.
+    manager_noise = 0.1 # for target policy smoothing.
+    manager_noise_clip = 0.3 # for target policy smoothing.
     manager_train_start =50
     high_start_timesteps = 5e2 # timesteps for random high-policy
-    low_start_timesteps = 1e4 # timesteps for random low-policy
+    low_start_timesteps = 0 # timesteps for random low-policy
     # number of candidates for off-policy correction
     candidate_goals = 8
     # general hyper_params
     seed=0 
     steps_per_epoch=1000
     epochs=100
+    save_freq = 5e3
     ctrl_replay_size=int(5e4) # Memory leakage?
     man_replay_size=int(5e4) # Memory leakage?
     gamma=0.99 # for both hi & lo level policies
@@ -355,7 +359,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     batch_size=100
     start_steps=5000
     max_ep_len=1000
-    save_freq=1
 
     #manager td3
     noise_idx = 1 # 0: ou 1: normal
@@ -367,8 +370,25 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     lam_std = 1e-3
     lam_preact = 0.0
 
+    # wandb
+    wandb.config.mananger_propose_freq = manager_propose_freq
+    wandb.config.train_manager_freq = train_manager_freq
+    wandb.config.manager_noise = manager_noise
+    wandb.config.manager_noise_clip = manager_noise_clip
+    wandb.config.manager_train_start = manager_train_start
+    wandb.config.high_start_timesteps = high_start_timesteps
+    wandb.config.low_start_timesteps = low_start_timesteps
+    wandb.config.candidate_goals = candidate_goals
+    wandb.config.steps_per_epoch = steps_per_epoch
+    wandb.config.ctrl_replay_size, wandb.config.man_replay_size = int(5e4), int(5e4) 
+    wandb.config.gamma = gamma 
+    wandb.config.polyak = polyak 
+    wandb.config.polyak = polyak 
+    wandb.config.pi_lr = pi_lr 
+    wandb.config.vf_lr = vf_lr 
+    wandb.config.alp_lr = alp_lr 
 
-    IS_TRAIN = True
+    IS_TRAIN = train_indicator
     USE_CARTESIAN = True
     USE_GRIPPER = True
 
@@ -382,6 +402,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
     # arguments for RobotEnv : isdagger, isPOMDP, isGripper, isReal
     env = robotEnv(isPOMDP=True, isGripper=USE_GRIPPER, isCartesian=USE_CARTESIAN, train_indicator=IS_TRAIN)
+
     rospy.loginfo("Evironment has been created")
     # instantiate actor-critic nets for controller
     controller_actor_critic = hrl_core.cnn_controller_actor_critic
@@ -414,8 +435,90 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         des_goal_dim += grip_dim
         sub_goal_dim += grip_dim
    
-    sub_goal_space = (-np.inf, np.inf)
+    # state space upper/lower limits ...
+    # define the state-space -> rescale & relocate the subgoal estimation
 
+    ee_pos = {'x':{'lo': 0.3397,'mean': 0.5966,'hi': 0.9697},
+              'y':{'lo': -0.3324,'mean': 0.0274,'hi': 0.3162},
+              'z':{'lo': 0.0200,'mean': 0.1081,'hi': 0.7638}}
+
+    ee_quat = {'x':{'lo': -0.0734,'mean': 0.9710,'hi': 1.0000},
+               'y':{'lo': -0.4876,'mean': -0.0196,'hi': 0.2272},
+               'z':{'lo': -0.3726,'mean': -0.0222,'hi': 0.6030},
+               'w':{'lo': -0.9128,'mean': 0.0462,'hi': 0.9398}}
+
+    # roll should be considered for its absolute value (2.8~3.14)
+    # should compare with absolute value of the roll
+    # TODO: if ee_quat is not effective, replace it with ee_rpy
+    ee_rpy = {'r':{'lo': 2.8000,'mean': 3.0000,'hi': 3.1400},
+              'p':{'lo': -0.4000,'mean': 0.0,'hi': 0.4000},
+              'y':{'lo': -0.4500,'mean': 0.0,'hi': 0.4500}}
+
+    joint_p = {'j1':{'lo': -0.6110,'mean': 0.000,'hi': 0.6110},
+               'j2':{'lo': -1.1530,'mean': -0.7750,'hi': 0.0000},
+               'j3':{'lo': -1.6550,'mean': -0.321,'hi': 0.0000},
+               'j4':{'lo': 0.5186,'mean': 1.1511,'hi': 2.191},
+               'j5':{'lo': -1.369,'mean': 0.0123,'hi': 1.4400},
+               'j6':{'lo': -1.538,'mean': 0.7484,'hi': 1.3150},
+               'j7':{'lo': -2.500,'mean': -1.804,'hi': -1.00}}
+    # joint vels and efforts when imobile
+    # velocity: [-0.001, -0.001, -0.001, -0.001, -0.001, -0.001, -0.001]
+    # effort: [0.156, -30.78, -6.676, -9.88, 2.444, 0.2, 0.12]
+
+    joint_v = {'j1':{'lo': -1.000,'mean': 0.000,'hi': 1.000},
+               'j2':{'lo': -0.6000,'mean': 0.000,'hi': 0.6000},
+               'j3':{'lo': -1.655,'mean': -0.321,'hi': 0.0000},
+               'j4':{'lo': -1.000,'mean': 0.000,'hi': 1.000},
+               'j5':{'lo': -1.200,'mean': 0.000,'hi': 1.200},
+               'j6':{'lo': -1.500,'mean': 0.000,'hi': 1.000},
+               'j7':{'lo': -2.200,'mean': 0.000,'hi': 1.900}}
+    
+    joint_e = {'j1':{'lo': -2.500,'mean': 0.000,'hi': 2.500},
+               'j2':{'lo': -42.00,'mean': -30.00,'hi': -14.83},
+               'j3':{'lo': -15.63,'mean': -6.676,'hi': -1.564},
+               'j4':{'lo': -15.74,'mean': -10.22,'hi': 0.200},
+               'j5':{'lo': -2.412,'mean': 2.000,'hi': 3.312},
+               'j6':{'lo': -1.100,'mean': 0.200,'hi': 2.520},
+               'j7':{'lo': -0.700,'mean': 0.05,'hi': 1.228}}
+
+    grip_pos = {'pos':{'lo': 0.0,'mean': 0.022,'hi': 0.044}}
+
+
+    act_space = {'j1':{'lo': -0.850,'mean': 0.000,'hi': 0.850},
+                   'j2':{'lo': -0.800,'mean': -0.100,'hi': 0.650},
+                   'j3':{'lo': -0.600,'mean': -0.300,'hi': 0.630},
+                   'j4':{'lo': -0.870,'mean': 0.000,'hi': 0.800},
+                   'j5':{'lo': -1.200,'mean': 0.000,'hi': 1.200},
+                   'j6':{'lo': -1.500,'mean': 0.000,'hi': 1.500},
+                   'j7':{'lo': -1.500,'mean': 0.000,'hi': 1.500},
+                   'grip':{'lo': -1.500,'mean': 0.000,'hi': 1.500}}
+
+
+    # TODO: check if state space for the aux info is
+    # sub_goal_space = dict(ee_pos=ee_pos, ee_quat=ee_quat, ee_rpy=ee_rpy,
+    #                   joint_p=joint_p, joint_v=joint_v, joint_e=joint_e)
+
+    # state order should be equivalent to full_stt
+    sub_goal_space = dict(joint_p=joint_p, joint_v=joint_v, joint_e=joint_e,
+                      grip_pos=grip_pos, ee_pos=ee_pos, ee_quat=ee_quat)
+
+    min_tensor = [joint_p['j1']['lo'], joint_p['j2']['lo'], joint_p['j3']['lo'], joint_p['j4']['lo'], joint_p['j5']['lo'], joint_p['j6']['lo'], joint_p['j7']['lo'],
+                  joint_v['j1']['lo'], joint_v['j2']['lo'], joint_v['j3']['lo'], joint_v['j4']['lo'], joint_v['j5']['lo'], joint_v['j6']['lo'], joint_v['j7']['lo'],
+                  joint_e['j1']['lo'], joint_e['j2']['lo'], joint_e['j3']['lo'], joint_e['j4']['lo'], joint_e['j5']['lo'], joint_e['j6']['lo'], joint_e['j7']['lo'],
+                  grip_pos['pos']['lo'], ee_pos['x']['lo'], ee_pos['y']['lo'], ee_pos['z']['lo'], ee_quat['x']['lo'], ee_quat['y']['lo'], ee_quat['z']['lo'], ee_quat['w']['lo']]
+    
+    max_tensor = [joint_p['j1']['hi'], joint_p['j2']['hi'], joint_p['j3']['hi'], joint_p['j4']['hi'], joint_p['j5']['hi'], joint_p['j6']['hi'], joint_p['j7']['hi'],
+                  joint_v['j1']['hi'], joint_v['j2']['hi'], joint_v['j3']['hi'], joint_v['j4']['hi'], joint_v['j5']['hi'], joint_v['j6']['hi'], joint_v['j7']['hi'],
+                  joint_e['j1']['hi'], joint_e['j2']['hi'], joint_e['j3']['hi'], joint_e['j4']['hi'], joint_e['j5']['hi'], joint_e['j6']['hi'], joint_e['j7']['hi'],
+                  grip_pos['pos']['hi'], ee_pos['x']['hi'], ee_pos['y']['hi'], ee_pos['z']['hi'], ee_quat['x']['hi'], ee_quat['y']['hi'], ee_quat['z']['hi'], ee_quat['w']['hi']] 
+
+ 
+    # mean = np.array(mean).reshape(1,-1)
+    # scale = np.array(scale).reshape(1,-1)
+    # action = action * scale + mean
+
+
+    action_space = act_space
 
     # Inputs to computation graph -> placeholders for next goal state is necessary.
     obs_ph = tf.placeholder(dtype=tf.float32, shape=(None,)+obs_dim) # o_t : low_level controller
@@ -453,7 +556,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             epsilon = tf.random_normal(tf.shape(mu_hi_targ), stddev=manager_noise)
             epsilon = tf.clip_by_value(epsilon, -manager_noise_clip, manager_noise_clip)
             act_hi_targ = mu_hi_targ + epsilon
-            act_hi_targ = tf.clip_by_value(act_hi_targ, action_space[0], action_space[1]) # equivalent to periodic subgoals
+            # act_hi_targ = tf.clip_by_value(act_hi_targ, action_space[0], action_space[1]) # equivalent to periodic subgoals
+            act_hi_targ = tf.minimum(max_tensor, tf.maximum(min_tensor, act_hi_targ)) # equivalent to periodic subgoals
             # target Q-values, using action from target policy
             _, q1_targ_hi, q2_targ_hi, _ = manager_actor_critic(stt1_ph, dg1_ph, act_hi_targ, aux_ph, action_space=sub_goal_space)
 
@@ -489,7 +593,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # Min Double-Q:
         min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
         # Targets for Q and V regression
-        log_alpha_lo = tf.get_variable(name='log_alpha', initializer=0.0, dtype=np.float32)
+        log_alpha_lo = tf.get_variable(name='log_alpha', initializer=-1.0, dtype=np.float32)
         alpha_lo = tf.exp(log_alpha_lo) 
         q_backup_lo = tf.stop_gradient(rew_ph_lo + gamma*(1-dn_ph)*v_targ_lo) # learned by Mean squared Bellman error -> equal to conventional relation
         v_backup_lo = tf.stop_gradient(min_q_pi_lo - alpha_lo * logp_pi_lo) # learned by approx. relation btwn soft Vf and soft Qf
@@ -593,7 +697,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
         # All ops to call during one training step
         step_lo_ops = [pi_loss_lo, q1_loss_lo, q2_loss_lo, v_loss_lo, q1_lo, q2_lo, v_lo, logp_pi_lo, 
-                    train_pi_lo_op, train_value_lo_op, target_update_lo]
+        train_pi_lo_op, train_value_lo_op, target_update_lo]
+        # step_lo_ops = [q_backup_lo, q1_lo, q1_pi_lo, pi_loss_lo, q1_loss_lo, q2_loss_lo, v_loss_lo, q1_lo, q2_lo, v_lo, logp_pi_lo, 
+        #             train_pi_lo_op, train_value_lo_op, target_update_lo]
         monitor_lo_ops = [pi_lo_summary_op, v_lo_summary_op]
         # step_lo_ops +=monitor_lo_ops 
         alpha_lo_op = [train_alpha_lo_op]
@@ -610,7 +716,11 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     config = tf.ConfigProto()
     # config.gpu_options.allow_growth = True
     config.gpu_options.per_process_gpu_memory_fraction = 0.3
+
+
     sess = tf.Session(config=config)
+
+    saver = tf.train.Saver()
 
     rospy.loginfo("initializing global variables...")
 
@@ -633,6 +743,58 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # Setup model saving
     # logger.setup_tf_saver(sess, inputs={'obs': x_ph, 'a': a_ph}, 
     #                             outputs={'mu': mu, 'pi': pi, 'q1': q1, 'q2': q2, 'v': v})
+
+    def normalize_action(action, space, batch_size=1):
+        """ relocate and rescale the aciton of controller policy (subgoal) to desirable values.    
+            action_dim = (7, 1) joint_vels + gripper_position
+        """
+        low = list()
+        high = list()
+        mean = list()
+        scale = list()        
+        for key, value in space.items():
+            for k, v in value.items():
+                low.append(v['lo'])
+                high.append(v['hi'])
+                mean.append(v['mean'])
+                scale.append((v['hi']-v['lo'])/2)
+        low = np.array(low).reshape(1,-1)
+        high = np.array(high).reshape(1,-1)
+        mean = np.array(mean).reshape(1,-1)
+        scale = np.array(scale).reshape(1,-1)
+        action = action * scale + mean
+        norm_action = np.clip(action, low, high)
+        return norm_action
+
+    def normalize_subgoal(action, space, batch_size=1, issubgoal=True):
+        """ relocate and rescale the aciton of manager policy (subgoal) to desirable values.    
+            subgoal_policy = tensor of shape (1, 29(full_stt + ee + gripper) )
+            subgoal_dim = dict(ee_pos=ee_pos, ee_quat=ee_quat, ee_rpy=ee_rpy,
+                        joint_p=joint_p, joint_v=joint_v, joint_e=joint_e) 
+            subgoal_dim = (3, 4, 3, 7, 7, 7) total 29-dim
+        """
+        if issubgoal:
+            low = list()
+            high = list()
+            mean = list()
+            scale = list()        
+            for key, value in space.items():
+                for k, v in value.items():
+                    low.append(v['lo'])
+                    high.append(v['hi'])
+                    mean.append(v['mean'])
+                    scale.append((v['hi']-v['lo'])/2)
+            # here, reloc is the mean
+            # low = np.tile(np.array(low), [batch_size,1])
+            # high = np.tile(np.array(high), [batch_size,1])
+            low = np.array(low).reshape(1,-1)
+            high = np.array(high).reshape(1,-1)
+            mean = np.array(mean).reshape(1,-1)
+            scale = np.array(scale).reshape(1,-1)
+            action = action * scale + mean
+            norm_action = np.clip(action, low, high)
+        return norm_action
+
     def reloc_rescale_gripper(gripper):
         """ relocate & rescale action to the desirable gripper 
         """
@@ -640,23 +802,30 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
     def get_action(obs, sub_goal, deterministic=False): # True for test
         """ infer primitive action from low-level policy
+            TODO : manage when the obs and sub_goal are batch of actions
+            7 joint velocities 
         """
         act_op = mu_lo if deterministic else pi_lo # returned from actor_critic function
-        sub_goal, obs = normalize_observation(full_stt=subgoal.reshape((-1)+subgoal.shape), c_obs=obs.reshape((-1,)+obs.shape))
+        # sub_goal, obs = normalize_observation(full_stt=subgoal.reshape((-1,)+subgoal.shape), c_obs=obs.reshape((-1,)+obs.shape))
+        sub_goal, obs = normalize_observation(full_stt=sub_goal.reshape((-1,sub_goal_dim)), c_obs=obs.reshape((-1,)+obs_dim))
         # TODO: resolve shape mismatching issue
-        return sess.run(act_op, feed_dict={obs_ph: obs.reshape((-1,)+obs.shape),
-                                           sg_ph: subgoal.reshape((-1)+subgoal.shape)}) # select action from single obs
-
+        # return normalize_action(sess.run(act_op, feed_dict={obs_ph: obs,
+        #                                    sg_ph: sub_goal}), space=action_space, batch_size=obs.shape[0]) # select action from single obs
+        return sess.run(act_op, feed_dict={obs_ph: obs,
+                                           sg_ph: sub_goal})
     def get_subgoal(state, des_goal):
         """ infer subgoal from high-level policy for every freq.
         The output of the higher-level actor net is scaled to an approximated range of high-level acitons.
         7 joint torques : , 7 joint velocities: , 7 joint_positions: , 3-ee positions: , 4-ee quaternions: , 1 gripper_position:
         """
-        state = normalize_observation(full_stt=state.reshape((-1,)+state.shape))
-        des_goal = normalize_observation(full_stt=des_goal.reshape((-1,)+des_goal.shape))
-        return sess.run(mu_hi, feed_dict={stt_ph: state.reshape((-1,)+state.shape),
-                                          dg_ph: des_goal.reshape(1,des_goal_dim)})
- 
+        # state = normalize_observation(full_stt=state.reshape((-1,)+state.shape))
+        # des_goal = normalize_observation(full_stt=des_goal.reshape((-1,)+des_goal.shape))
+        state = normalize_observation(full_stt=state.reshape((-1, stt_dim)))
+        des_goal = normalize_observation(full_stt=des_goal.reshape((-1,des_goal_dim)))
+        # return normalize_subgoal(sess.run(mu_hi, feed_dict={stt_ph: state,    
+        #                                   dg_ph: des_goal}), space=sub_goal_space, batch_size=state.shape[0])
+        return sess.run(mu_hi, feed_dict={stt_ph: state,    
+                                          dg_ph: des_goal})
     def train_low_level_controller(train_ops, buffer, ep_len=max_ep_len, batch_size=batch_size, discount=gamma, polyak=polyak):
         """ train low-level actor-critic for each episode's timesteps
         TODO: determine what arguments to be parsed for this function.
@@ -674,6 +843,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 + train_alpha_op
         TODO: check for the placeholders for train_alpha_op
         """
+        rospy.logwarn("Now trains the low-level controller for %d timesteps", ep_len)
         controller_ops = train_ops
         _ctrl_buffer = buffer
         for itr in range(ep_len):
@@ -693,14 +863,15 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             low_outs = sess.run(controller_ops, ctrl_feed_dict)
             # logging
             wandb.log({'policy_loss_lo': low_outs[0], 'q1_loss_lo': low_outs[1],
-                        'q1_loss_lo': low_outs[2], 'v_loss_lo': low_outs[3],
-                        'q1_lo': low_outs[4], 'q1_lo': low_outs[5], 'v_lo': low_outs[6]})
+                        'q2_loss_lo': low_outs[2], 'v_loss_lo': low_outs[3],
+                        'q1_lo': low_outs[4], 'q2_lo': low_outs[5], 'v_lo': low_outs[6]})
 
     def off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=100, discount=gamma, polyak=polyak):
         """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
         e.g. shape = (batch_size, seq, state_dim)
         we need additional o_seq to generate actions from low-level policy
         """
+        rospy.loginfo("Now we apply off-policy correciton")
         _s_seq = s_seq
         _o_seq = o_seq
         _a_seq = a_seq
@@ -750,8 +921,15 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # shape of the np.array 'batched_candidiates[i]' -> (flat_batch_size, 24)
         batched_candidates = np.tile(candidates, [seq_len, 1, 1]) # candidate goals
 
+        batched_candidates= batched_candidates.transpose(1,0,2)
+
+
         pi_lo_actions = np.zeros((ncands, flat_batch_size) + action_dim) # shape (10, flat_batch_size, 8)
+
         # for which goal the new low policy would have taken the same action as the old one?
+        # TODO: debug the shape for the batch action estimations
+        # (1000, 100, 100, 3)
+        # (10, 29)
         for c in range(ncands): # one sample for each iteration?
             pi_lo_actions[c] = get_action(observations, batched_candidates[c]) #320 action estimations for each candidate out of 10
 
@@ -766,20 +944,23 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # shape of the candidates (batch, n_cands, goal_dim)
         return candidates[np.arange(batch_size),max_indicies] # [for each batch, max index]
 
-    def train_high_level_manager(train_ops, buffer, batch_size=batch_size, discount=gamma, polyak=polyak):
+    def train_high_level_manager(train_ops, buffer, ep_len=(max_ep_len/manager_propose_freq), batch_size=batch_size, discount=gamma, polyak=polyak):
         """ train high-level actor-critic for each episode's (timesteps/manager_train_freq)
         TODO: determine what arguments to be parsed for this function.
         ops for high-level controller -> must in order for TD3 leanring.
             NOTE : actor of the td3 is updated in delayed manner -> hyper param.
             NOTE : off-policy correction must be done here.
             SEQUENCE : 1. 2. 3. 
-        fed train_ops :
-                [pi_loss_lo, q1_loss_lo, q2_loss_lo, v_loss_lo,
-                 q1_lo, q2_lo, v_lo, logp_pi_lo, 
+        TODO: check if primitive actions are required for training high-level manager.
+        fed train_ops :            
+            [pi_loss_hi, q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, 
+                train_pi_hi_op, train_q_hi_op, target_update_hi]
             1. learn Q-ftn : y = r + gamma*(1-done)*Q(s'||g_des,sg'=mu_hi(s'||g_des))
             2. learn pi    : E[Q(s||g_des,mu_hi(s||g_des))]
                 -> placeholder for sg_ph is only required for 'target Q tfn' ops.
         """
+        rospy.logwarn("Now trains the high-level controller for %d timesteps", ep_len)
+        _man_buffer = buffer
         # execute off-policy correction before training
         batch = _man_buffer.sample_batch(batch_size)
         # subgoal here is the action of manager network, action for computing log-likelihood
@@ -787,11 +968,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # shape of corr_subgoals (batch_size, goal_dim)
         o_seq= batch['ot_seq'], a_seq= batch['at_seq'])
         manager_ops = train_ops
-        _man_buffer = buffer
         # action of the manager is subgoal...
         man_feed_dict = {stt_ph: normalize_observation(full_stt=batch['st']),
                          stt1_ph: normalize_observation(full_stt=batch['st1']),
-                         act_ph: normalize_observation(act=batch['acts']),
+                         sg_ph: normalize_observation(full_stt=batch['acts']),
                          dg_ph : normalize_observation(full_stt=batch['g']),
                          dg1_ph : normalize_observation(full_stt=batch['g1']),
                          aux_ph : normalize_observation(aux=batch['aux']),
@@ -810,51 +990,41 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         will only be used for each subgoal /action estimation from the manager/controller policy
         """
         if c_obs is not None and full_stt is None:
-            c_obs =  normalize(c_obs[:], summary_manager.s_t0_rms)
+            c_obs[:] =  normalize(c_obs[:], summary_manager.s_t0_rms)
             return c_obs
         elif full_stt is not None and c_obs is None:
-            full_stt[:7] = normalize(full_stt[:][:7], summary_manager.s_t1_rms) # joint pos
-            full_stt[7:14] = normalize(full_stt[:][7:14], summary_manager.s_t2_rms) # joint vel
-            full_stt[14:21] = normalize(full_stt[:][14:21], summary_manager.s_t3_rms) # joint eff
-            full_stt[21:22] = normalize(full_stt[:][21:22], summary_manager.s_t4_rms) # gripper position
-            full_stt[22:] = normalize(full_stt[:][22:], summary_manager.s_t5_rms) # ee pose
+
+            full_stt[:,:7] = normalize(full_stt[:,:7], summary_manager.s_t1_rms) # joint pos
+            full_stt[:,7:14] = normalize(full_stt[:,7:14], summary_manager.s_t2_rms) # joint vel
+            full_stt[:,14:21] = normalize(full_stt[:,14:21], summary_manager.s_t3_rms) # joint eff
+            full_stt[:,21:22] = normalize(full_stt[:,21:22], summary_manager.s_t4_rms) # gripper position
+            full_stt[:,22:] = normalize(full_stt[:,22:], summary_manager.s_t5_rms) # ee pose
             return full_stt
         elif act is not None:
-            return normalize(act[:], summary_manager.a_t_rms)
+            act[:] = normalize(act[:], summary_manager.a_t_rms)
+            return act
         elif aux is not None:
-            return normalize(aux[:], summary_manager.s_t6_rms)
+            aux[:] = normalize(aux[:], summary_manager.s_t6_rms)
+            return aux
         else:
-            c_obs = normalize(c_obs, summary_manager.s_t0_rms)
-            full_stt[:7] = normalize(full_stt[:][:7], summary_manager.s_t1_rms) # joint pos
-            full_stt[7:14] = normalize(full_stt[:][7:14], summary_manager.s_t2_rms) # joint vel
-            full_stt[14:21] = normalize(full_stt[:][14:21], summary_manager.s_t3_rms) # joint eff
-            full_stt[21:22] = normalize(full_stt[:][21:22], summary_manager.s_t4_rms) # gripper position
-            full_stt[22:] = normalize(full_stt[:][22:], summary_manager.s_t5_rms) # ee pose
+            c_obs[:] = normalize(c_obs[:], summary_manager.s_t0_rms)
+            full_stt[:,:7] = normalize(full_stt[:,:7], summary_manager.s_t1_rms) # joint pos
+            full_stt[:,7:14] = normalize(full_stt[:,7:14], summary_manager.s_t2_rms) # joint vel
+            full_stt[:,14:21] = normalize(full_stt[:,14:21], summary_manager.s_t3_rms) # joint eff
+            full_stt[:,21:22] = normalize(full_stt[:,21:22], summary_manager.s_t4_rms) # gripper position
+            full_stt[:,22:] = normalize(full_stt[:,22:], summary_manager.s_t5_rms) # ee pose
             return full_stt, c_obs
 
 
-
-
-    # def test_agent(n=10): NOT NECESSARY
-    #     global sess, mu, pi, q1, q2, q1_pi, q2_pi
-    #     for j in range(n):
-    #         o, r, d, ep_ret, ep_len = test_env.reset(), 0, False, 0, 0
-    #         while not(d or (ep_len == max_ep_len)):
-    #             # Take deterministic actions at test time 
-    #             o, r, d, _ = test_env.step(get_action(o, True))
-    #             ep_ret += r
-    #             ep_len += 1
-    #         logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
-
     DEMO_USE = False # DAgger should be reimplemented 
-    os.chdir(DEMO_DIR)
+    # os.chdir(DEMO_DIR)
 
     # FILL UP REPLAY BUFFER!
     # how demo transition consists of
     # obs_t,  stt_t, act_t,   rew_t, obs_t+1, stt_t+1, done
 
     # How should I merge demo acquisition to HIRO architecture?
-    if os.path.exists(DEMO_DATA) and not train_indicator and DEMO_USE:
+    if os.path.exists(DEMO_DIR+DEMO_DATA) and not train_indicator and DEMO_USE:
         print ('initialize the replay buffer with demo data')
         with open(DEMO_DATA, 'rb') as f:
             dagger = pickle.load(f)
@@ -875,9 +1045,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         logger.load_weight(SAC_PI_MODEL_LOADDIR, sess=sess,var_list=get_vars('main/pi'))
         # logger.load_weight(SAC, sess=sess,var_list=get_vars('v'))
         print ("=======================================================")
-        print ("=======================================================")
         print ("SUCCESSFULLY LOADED PRE-TRAINED POLICY")
-        print ("=======================================================")
         print ("=======================================================")
 
     if noise_type == "normal":
@@ -896,9 +1064,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     episode_num = 0
     ep_timesteps = 0
     done = True
+    reset = False
     manager_transition = list()
     controller_transition = list()
-
+    saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
     # Main loop: collect experience in env and update/log each epoch
     while not rospy.is_shutdown() and t <int(total_steps):
     # for t in range(total_steps):
@@ -908,9 +1077,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         use the learned policy. => Is it really necessary?
         """
         # for t in range(local_steps_per_epoch):
-        if t % manager_propose_freq == 0:
+        # if t % manager_propose_freq == 0:
+        if (done or reset) and train_indicator:
             # for every c-step, train controller c-iters and manager 1-iter
-            if t != 0:
+            if t != 0 and not reset:
                 # 1) Add manager transition to buffer.
                 # manager_buffer.add_episode()
 
@@ -927,7 +1097,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 # manager_temp_transition = [_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done ]
                 
                 # Process final state/obs, store manager transition, if it was not just created
-                if len(manager_temp_transition[-2]) != 1:
+                if len(manager_temp_transition[2]) != 1:
                 #                                   0       1    2      3      4        5       6     7     8     9     10    11     12  13    
                     # buffer store arguments :    s_seq, o_seq, a_seq, obs,  obs_1,     dg,    dg_1, stt, stt_1, act,  aux, aux_1,  rew, done 
                     manager_temp_transition[4] = c_obs # save s_t+c
@@ -935,18 +1105,22 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                     manager_temp_transition[-1] = float(True) # done = True since c-step has passed?
             
                 # every manager transition should have the same length of sequence -> append unnecesary data to sequences
-                if len(manager_temp_transition[2]) <= manager_propose_freq:
-                    while len(manager_transition[-2]) <= manager_propose_freq:
-                        manager_temp_transition[0].append(c_obs) # s_seq
-                        manager_temp_transition[1].append(full_stt) # o_seq
-                        manager_temp_transition[2].append(np.inf) # a_seq
+                # TODO: debug here...
+                if len(manager_temp_transition[0]) <= manager_propose_freq:
+                    while len(manager_temp_transition[0]) <= manager_propose_freq:
+                        manager_temp_transition[0].append(full_stt) # s_seq
+                        manager_temp_transition[1].append(c_obs) # o_seq
+                        manager_temp_transition[2].append(action) # a_seq
 
                 # buffer store arguments : s_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done 
                 manager_buffer.store(*manager_temp_transition) # off policy correction is done inside the manager_buffer 
             
+            
+    
             # reset environment
             obs = env.reset() #'observation', 'desired_goal', g_des -> task specific goal!
             done = False
+            reset = False
             c_step_reward = 0
             ep_len = 0
             ep_ret = 0
@@ -970,7 +1144,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # buffer store arguments :    s_seq,    o_seq, a_seq, obs,  obs_1,     dg,    dg_1,      stt, stt_1, act,  aux, aux_1,  rew, done 
             manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
 
-        if not train_indicator:
             randomize_world() # domain randomization
 
         if t < low_start_timesteps:
@@ -980,34 +1153,39 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             action = np.squeeze(action) # (1,8) -> (8,): stochastic action
             action[-1] = reloc_rescale_gripper(action[-1])
         next_obs, manager_reward, done = env.step(action) # reward R_t-> for high-level manager -> for sum(R_t:t+c-1)
-
+        if train_indicator:
+            randomize_world()
         # update episodic logs
         # Ignore the "done" signal if it comes from hitting the time
         # horizon (that is, when it's an artificial terminal signal
         # that isn't based on the agent's state) -> if done = False for the max_timestep
         # DO NOT Make done = True when it hits timeout
         ep_len += 1
-        done = False if ep_len== max_ep_len else done 
+        done, reset = False, True if ep_len== max_ep_len else done
+        
 
         next_full_stt = np.concatenate(next_obs['observation']['full_state']) # s_t
         next_c_obs = next_obs['observation']['color_obs'] #o_t
         next_aux = obs['auxiliary'] # g_des
 
         # append manager transition
-        manager_temp_transition[-1] = float(True)
-        manager_temp_transition[-2] += manager_reward # sum(R_t:t+c)
-        manager_temp_transition[0].append(next_full_stt) # append s_seq
-        manager_temp_transition[1].append(next_c_obs) # append o_seq
-        manager_temp_transition[2].append(action)     # append a_seq
+        if train_indicator:
+            manager_temp_transition[-1] = float(True)
+            manager_temp_transition[-2] += manager_reward # sum(R_t:t+c)
+            manager_temp_transition[0].append(next_full_stt) # append s_seq
+            manager_temp_transition[1].append(next_c_obs) # append o_seq
+            manager_temp_transition[2].append(action)     # append a_seq
         
         # compute intrinsic reward
-        intrinsic_reward = env.compute_intrinsic_reward(full_stt, next_full_stt, subgoal)
+            intrinsic_reward = env.compute_intrinsic_reward(full_stt, next_full_stt, subgoal)
+
         # subgoal transition
         next_subgoal = env.env_goal_transition(full_stt, next_full_stt, subgoal)
         # add transition for low-level policy
         # (obs, obs1, sg, sg1, stt, stt1, act, aux, rew, done)
-        controller_buffer.store(c_obs, next_c_obs, subgoal, 
-        next_subgoal, full_stt, next_full_stt, action, aux, next_aux, intrinsic_reward, done)
+        if train_indicator:
+            controller_buffer.store(c_obs, next_c_obs, subgoal, 
+            next_subgoal, full_stt, next_full_stt, action, aux, next_aux, intrinsic_reward, done)
 
         # update observations and subgoal
         obs = next_obs
@@ -1024,41 +1202,48 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # Super critical, easy to overlook step: make sure to update 
             # most recent observation!
             # Store experience to replay buffer
-        
-        if timesteps_since_subgoal % manager_propose_freq == 0:
-            # Finish, add transition
+        if train_indicator:        
+            if timesteps_since_subgoal % manager_propose_freq == 0:
+                # Finish, add transition
 
 
-            manager_temp_transition[4] = c_obs # save s_t+c
-            manager_temp_transition[8] = full_stt # save s_t+c
-            manager_temp_transition[-1] = float(True) # done = True since c-step has passed?
-            
-            # manager_temp_transition[0].append(next_full_stt) # append s_seq
-            # manager_temp_transition[1].append(next_c_obs) # append o_seq
-            # manager_temp_transition[2].append(action)     # append a_seq
+                manager_temp_transition[4] = c_obs # save s_t+c
+                manager_temp_transition[8] = full_stt # save s_t+c
+                manager_temp_transition[-1] = float(True) # done = True since c-step has passed?
+                
+                # manager_temp_transition[0].append(next_full_stt) # append s_seq
+                # manager_temp_transition[1].append(next_c_obs) # append o_seq
+                # manager_temp_transition[2].append(action)     # append a_seq
 
-            manager_buffer.store(*manager_temp_transition)
+                manager_buffer.store(*manager_temp_transition)
 
-            subgoal = get_subgoal(full_stt, des_goal) # action_dim = (1, stt_dim) -> defaults to 25-dim
-            _subgoal_noise = subgoal_noise() # random sample when called
-            subgoal += _subgoal_noise
-            timesteps_since_subgoal = 0
-            # Create a high level transition
+                subgoal = get_subgoal(full_stt, des_goal) # action_dim = (1, stt_dim) -> defaults to 25-dim
+                _subgoal_noise = subgoal_noise() # random sample when called
+                subgoal += _subgoal_noise
+                timesteps_since_subgoal = 0
+                # Create a high level transition
 
-            manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
+                manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
 
-        # save models for some period
-        # if not train_indicator and t > 0 and t % steps_per_epoch==0: # save models
-        #     epoch = t // steps_per_epoch
-        #     if (epoch % save_freq == 0) or (epoch == epochs-1):
-        #         logger.save_weight(SAC_PI_MODEL_SAVEDIR, sess=sess, 
-        #             var_list=get_vars('main/pi'), step=t)
-        #         logger.save_weight(SAC_VF_MODEL_SAVEDIR, sess=sess, 
-        #             var_list=get_vars('main/v'), step=t)
-        #         logger.save_weight(SAC_QF1_MODEL_SAVEDIR, sess=sess, 
-        #             var_list=get_vars('main/q1'), step=t)
-        #         logger.save_weight(SAC_QF2_MODEL_SAVEDIR, sess=sess, 
-        #             var_list=get_vars('main/q2'), step=t)      
+            if t % save_freq == 0:
+                rospy.loginfo('##### saves manager network weights ##### for step %d', t)
+                # logger.save_weight(MAN_PI_MODEL_SAVEDIR, sess=sess, 
+                #     var_list=get_vars('manager/main/pi'), step=t)
+                # logger.save_weight(MAN_QF1_MODEL_SAVEDIR, sess=sess, 
+                #     var_list=get_vars('manager/main/q1'), step=t)
+                # logger.save_weight(MAN_QF2_MODEL_SAVEDIR, sess=sess, 
+                #     var_list=get_vars('manager/main/q2'), step=t)
+                rospy.loginfo('##### saves controller network weights ##### for step %d', t)
+                # logger.save_weight(CTRL_PI_MODEL_LOADDIR, sess=sess, 
+                #     var_list=get_vars('controller/main/pi'), step=t)
+                # logger.save_weight(CTRL_VF_MODEL_LOADDIR, sess=sess, 
+                #     var_list=get_vars('controller/main/v'), step=t)
+                # logger.save_weight(CTRL_QF1_MODEL_LOADDIR, sess=sess, 
+                #     var_list=get_vars('controller/main/q1'), step=t)
+                # logger.save_weight(CTRL_QF2_MODEL_LOADDIR, sess=sess, 
+                #     var_list=get_vars('controller/main/q2'), step=t)
+                saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
+                saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac.ckpt'), global_step=t)  
 
 
 if __name__ == '__main__':
