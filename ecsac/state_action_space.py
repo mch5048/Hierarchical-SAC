@@ -1,3 +1,5 @@
+from collections import OrderedDict as od
+
 ee_pos = od()
 ee_pos['x'] = {'lo': 0.3397,'mean': 0.5966,'hi': 0.9697}
 ee_pos['y'] = {'lo': -0.3324,'mean': 0.0274,'hi': 0.3162}
@@ -49,6 +51,20 @@ joint_e['j5'] = {'lo': -2.412,'mean': 2.000,'hi': 3.312}
 joint_e['j6'] = {'lo': -1.100,'mean': 0.200,'hi': 2.520}
 joint_e['j7'] = {'lo': -0.700,'mean': 0.05,'hi': 1.228}
 grip_pos = {'pos':{'lo': 0.0,'mean': 0.022,'hi': 0.044}}
+
+act_space = od()
+act_space['j1'] = {'lo': -0.850,'mean': 0.000,'hi': 0.850}
+act_space['j2'] = {'lo': -0.800,'mean': -0.100,'hi': 0.650}
+act_space['j3'] = {'lo': -0.600,'mean': -0.300,'hi': 0.630}
+act_space['j4'] = {'lo': -0.870,'mean': 0.000,'hi': 0.800}
+act_space['j5'] = {'lo': -1.200,'mean': 0.000,'hi': 1.200}
+act_space['j6'] = {'lo': -1.500,'mean': 0.000,'hi': 1.500}
+act_space['j7'] = {'lo': -1.500,'mean': 0.000,'hi': 1.500}
+act_space['grip'] = {'lo': -1.500,'mean': 0.000,'hi': 1.500}
+
+
+grip_pos = {'pos':{'lo': 0.0,'mean': 0.022,'hi': 0.044}}
+
 
 st_space = [joint_p, joint_v, joint_e, grip_pos, ee_pos, ee_quat]
 st_low = list()
