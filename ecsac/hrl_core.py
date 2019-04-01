@@ -70,17 +70,18 @@ def placeholders(*args):
 #     return input_tensor
 
 
-def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None):
+def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None, kernel_regularizer=None):
+    regularizer = tf.contrib.layers.l2_regularizer(scale=0.1)
     init_scale=np.sqrt(2)
     for h in hidden_sizes[:-1]:
-        x = (tf.layers.dense(x, units=h, activation=activation))
-    return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_initializer=ortho_init(init_scale))
+        x = (tf.layers.dense(x, units=h, activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=ortho_init(init_scale)))
+    return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_regularizer=kernel_regularizer, kernel_initializer=ortho_init(init_scale))
 
-def cnn_feature_extractor(x, activation=tf.nn.relu):
+def cnn_feature_extractor(x, activation=tf.nn.relu, kernel_regularizer=None):
     init_scale=np.sqrt(2)
-    x = tf.layers.conv2d(x, filters=32,kernel_size=8, strides=(4,4), activation=activation, kernel_initializer=ortho_init(init_scale), name='actor_conv1')
-    x = tf.layers.conv2d(x, filters=64,kernel_size=4, strides=(2,2), activation=activation, kernel_initializer=ortho_init(init_scale), name='actor_conv2')
-    x = tf.layers.conv2d(x, filters=64,kernel_size=3, strides=(1,1), activation=activation, kernel_initializer=ortho_init(init_scale), name='actor_conv3')
+    x = tf.layers.conv2d(x, filters=32,kernel_size=8, strides=(4,4), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=ortho_init(init_scale), name='actor_conv1')
+    x = tf.layers.conv2d(x, filters=64,kernel_size=4, strides=(2,2), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=ortho_init(init_scale), name='actor_conv2')
+    x = tf.layers.conv2d(x, filters=64,kernel_size=3, strides=(1,1), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=ortho_init(init_scale), name='actor_conv3')
     return tf.layers.flatten(x, name='actor_conv2fc')
 
 def get_vars(scope):
@@ -159,12 +160,13 @@ def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation):
 def mlp_deterministic_policy(stt, goal, sub_goal, aux, activation=tf.nn.relu, hidden_sizes=(512,256,256), output_activation=tf.nn.tanh):
     """ policy for high-level manager, TD3 policy
     """
+    init_scale=np.sqrt(2)
     batch_size = sub_goal.shape.as_list()[0]
     sg_dim = sub_goal.shape.as_list()[-1]
-    net = mlp(tf.concat([stt,goal], axis=-1), list(hidden_sizes), activation=activation)
-    mu = tf.layers.dense(net, sg_dim, activation=output_activation)
+    net = mlp(tf.concat([stt,goal], axis=-1), list(hidden_sizes), activation=activation, kernel_regularizer=None)
+    mu = tf.layers.dense(net, sg_dim, activation=output_activation, kernel_initializer=ortho_init(init_scale))
 
-    return mu, batch_size
+    return mu, net, batch_size
 
 def cnn_gaussian_policy(obs, act, goal, activation=tf.nn.relu, output_activation=None):
     """ policy for low-level controller, SAC policy
@@ -173,8 +175,8 @@ def cnn_gaussian_policy(obs, act, goal, activation=tf.nn.relu, output_activation
     log_alpha = tf.get_variable(name='log_alpha', initializer=0.0, dtype=np.float32)
     _feat = cnn_feature_extractor(obs, activation)
     _feat = tf.concat([_feat, goal], axis=-1)
-    _feat = tf.layers.dense(_feat, units=256, activation=activation)
-    _feat = tf.layers.dense(_feat, units=256, activation=activation)
+    _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=ortho_init(init_scale))
+    _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=ortho_init(init_scale))
     # parameterized mean and stddev
     mu = tf.layers.dense(_feat, act_dim, activation=output_activation)
     mu = mu * a_scale + a_mean
@@ -186,9 +188,10 @@ def cnn_gaussian_policy(obs, act, goal, activation=tf.nn.relu, output_activation
     pi = tf.minimum(a_high, tf.maximum(a_low, pi))
     logp_pi = gaussian_likelihood(pi, mu, log_std)
 
-    return mu, pi, logp_pi
+    return mu, pi, logp_pi, std
 
 def apply_squashing_func(mu, pi, logp_pi):
+    """apply tanh activation"""
     mu = tf.tanh(mu)
     pi = tf.tanh(pi)
     # To avoid evil machine precision error, strictly clip 1-pi**2 to [0,1] range.
@@ -201,7 +204,7 @@ Actor-Critics for manager class : mu_hi, deterministic policy
 """
 
 
-def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space, hidden_sizes=(400,300), activation=tf.nn.relu, 
+def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space=None, hidden_sizes=(400,300), activation=tf.nn.relu, 
                      output_activation=tf.tanh, policy=mlp_deterministic_policy):
     """ actor-critic for TD3
         args: 
@@ -209,17 +212,21 @@ def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space, hidden_size
             => sub_goal_space = dict(ee_pos=ee_pos, ee_quat=ee_quat, ee_rpy=ee_rpy,
                       joint_p=joint_p, joint_v=joint_v, joint_e=joint_e)       
     """
-    sg_dim = sub_goal.shape.as_list()[-1]
+    kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=0.01)
+
     # policy
     with tf.variable_scope('pi'): # '/manager/main/pi/'
-        mu, batch_size = policy(stt, goal, sub_goal, aux, activation=activation, hidden_sizes=hidden_sizes, output_activation=output_activation)
+        mu, _pre_act, batch_size = policy(stt, goal, sub_goal, aux, activation=activation, hidden_sizes=hidden_sizes, output_activation=output_activation)
+
+    # policy reg losses
+    preact_reg = tf.norm(_pre_act) 
 
     # make sure actions are in correct range
     mu = mu * s_scale + s_mean
     mu = tf.minimum(s_high, tf.maximum(s_low, mu))
 
     # vfs for TD3
-    vf_mlp = lambda x : tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
+    vf_mlp = lambda x : tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None, kernel_regularizer=kernel_regularizer), axis=1)
     with tf.variable_scope('q1'):
         q1 = vf_mlp(tf.concat([stt, goal, sub_goal, aux], axis=-1))
     with tf.variable_scope('q1', reuse=True):
@@ -227,7 +234,7 @@ def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space, hidden_size
     with tf.variable_scope('q2'):
         q2 = vf_mlp(tf.concat([stt, goal, sub_goal, aux], axis=-1))
 
-    return mu, q1, q2, q1_pi
+    return mu, q1, q2, q1_pi, preact_reg
 
 
 
@@ -235,27 +242,32 @@ def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space, hidden_size
 Actor-Critics for controller class : mu_lo, stochastic policy
 """
 
-def cnn_controller_actor_critic(stt, obs, goal, act, aux, action_space,hidden_sizes=(512,256,256), activation=tf.nn.relu, 
+def cnn_controller_actor_critic(stt, obs, goal, act, aux, action_space=None, hidden_sizes=(512,256,256), activation=tf.nn.relu, 
                      output_activation=None, policy=cnn_gaussian_policy, isCartesian=True):
     """ Define actor-critic for controller policy ; actor: cnn critic: mlp
     """
+    kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=0.01)
+
     # policy
     with tf.variable_scope('pi'):
-        mu, pi, logp_pi = policy(obs, act, goal, activation, output_activation)
+        _mu, _pi, _logp_pi, std = policy(obs, act, goal, activation, output_activation)
         mu, pi, logp_pi = apply_squashing_func(mu, pi, logp_pi)
 
+    # poliy reg losses 
+    preact_reg = tf.norm(_mu)
+    std_reg = tf.norm(std)
     # value ftns
-    vf_mlp = lambda x : tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
+    vf_mlp = lambda x : tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None, kernel_regularizer=kernel_regularizer), axis=1)
     with tf.variable_scope('q1'):
-        q1 = tf.squeeze(mlp(tf.concat([stt, goal, act, aux], axis=-1), list(hidden_sizes)+[1], activation, None), axis=1)
+        q1 = vf_mlp(tf.concat([stt, goal, act, aux], axis=-1))
     with tf.variable_scope('q1', reuse=True): # same as TD3 value ftn for policy learning.
-        q1_pi = tf.squeeze(mlp(tf.concat([stt, goal, pi, aux], axis=-1), list(hidden_sizes)+[1], activation, None), axis=1)
+        q1_pi = vf_mlp(tf.concat([stt, goal, pi, aux], axis=-1))
     with tf.variable_scope('q2'):
-        q2 = tf.squeeze(mlp(tf.concat([stt, goal, act, aux], axis=-1), list(hidden_sizes)+[1], activation, None), axis=1)
+        q2 = vf_mlp(tf.concat([stt, goal, act, aux], axis=-1))
     with tf.variable_scope('q2', reuse=True):
-        q2_pi = tf.squeeze(mlp(tf.concat([stt, goal, pi, aux], axis=-1), list(hidden_sizes)+[1], activation, None), axis=1)
+        q2_pi = vf_mlp(tf.concat([stt, goal, pi, aux], axis=-1))
     with tf.variable_scope('v'):
-        v = tf.squeeze(mlp(tf.concat([stt, goal, aux], axis=-1), list(hidden_sizes)+[1], activation, None), axis=1)
+        v = vf_mlp(tf.concat([stt, goal, aux], axis=-1))
 
-    return mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, v
+    return mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, v, {'preact_reg':preact_reg, 'std_reg':std_reg}
 

@@ -63,7 +63,6 @@ act_space['j7'] = {'lo': -1.500,'mean': 0.000,'hi': 1.500}
 act_space['grip'] = {'lo': -1.500,'mean': 0.000,'hi': 1.500}
 
 
-grip_pos = {'pos':{'lo': 0.0,'mean': 0.022,'hi': 0.044}}
 
 
 st_space = [joint_p, joint_v, joint_e, grip_pos, ee_pos, ee_quat]

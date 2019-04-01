@@ -245,29 +245,23 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # hiro specific params
     manager_propose_freq = 10
     train_manager_freq= 10
-    manager_noise = 0.1 # for target policy smoothing.
-    manager_noise_clip = 0.3 # for target policy smoothing.
     manager_train_start =50
     high_start_timesteps = 5e2 # timesteps for random high-policy
-    low_start_timesteps = 0 # timesteps for random low-policy
-    # number of candidates for off-policy correction
+    low_start_timesteps = 5000 # timesteps for random low-policy
     candidate_goals = 8
+
     # general hyper_params
     seed=0 
-    steps_per_epoch=1000
+    # epoch : in terms of training nn
+    steps_per_epoch=4000
     epochs=100
-    save_freq = 1e3
-    ctrl_replay_size=int(5e4) # Memory leakage?
-    man_replay_size=int(5e4) # Memory leakage?
+    save_freq = 2e3 # every 2000 steps (2 epochs)
     gamma=0.99 # for both hi & lo level policies
     polyak=0.995 # tau = 0.005
     lr=1e-3 #for both actor
     pi_lr=1e-4
     vf_lr=1e-3 # for all the vf, and qfs
     alp_lr=3e-4 # for adjusting temperature
-    # alpha=0.4 # auto tuning of temperature?
-    # ecsac
-    target_ent=0.4 # learnable entropy
     batch_size=100
     start_steps=5000
     max_ep_len=1000
@@ -276,12 +270,17 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     noise_idx = 1 # 0: ou 1: normal
     noise_type = "normal" if noise_idx else "ou"
     noise_stddev = 0.25
-    # coefs for nn ouput regularizers
-    lam_ent =  1e-3
-    lam_mean = 1e-3
-    lam_std = 1e-3
-    lam_preact = 0.0
+    manager_noise = 0.1 # for target policy smoothing.
+    manager_noise_clip = 0.3 # for target policy smoothing.
+    man_replay_size=int(5e4) # Memory leakage?
+    delayed_update_freq = 4
+    #controller sac
+    ctrl_replay_size=int(5e4) # Memory leakage?
+    target_ent=0.01 # learnable entropy
 
+    # coefs for nn ouput regularizers
+    reg_param = {'lam_mean':1e-3, 'lam_std':1e-3}
+    lam_preact = 0.0
     # wandb
     wandb.config.mananger_propose_freq = manager_propose_freq
     wandb.config.train_manager_freq = train_manager_freq
@@ -292,7 +291,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     wandb.config.low_start_timesteps = low_start_timesteps
     wandb.config.candidate_goals = candidate_goals
     wandb.config.steps_per_epoch = steps_per_epoch
-    wandb.config.ctrl_replay_size, wandb.config.man_replay_size = int(5e4), int(5e4) 
+    wandb.config.ctrl_replay_size, wandb.config.man_replay_size = ctrl_replay_size, man_replay_size
     wandb.config.gamma = gamma 
     wandb.config.polyak = polyak 
     wandb.config.polyak = polyak 
@@ -370,11 +369,11 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # define operations for training high-level policy : TD3
     with tf.variable_scope('manager'):
         with tf.variable_scope('main'):                                                     
-            mu_hi, q1_hi, q2_hi, q1_pi_hi = manager_actor_critic(stt_ph, dg_ph, sg_ph, aux_ph, action_space=sub_goal_space)
+            mu_hi, q1_hi, q2_hi, q1_pi_hi, pi_reg_hi = manager_actor_critic(stt_ph, dg_ph, sg_ph, aux_ph, action_space=None)
         
         # target_policy network
         with tf.variable_scope('target'):
-            mu_hi_targ, _, _, _ = manager_actor_critic(stt1_ph, dg1_ph, sg_ph, aux_ph, action_space=sub_goal_space)
+            mu_hi_targ, _, _, _, _ = manager_actor_critic(stt1_ph, dg1_ph, sg_ph, aux_ph, action_space=None)
 
         # target_Q networks
         with tf.variable_scope('target', reuse=True): # re use the variable of q1 and q2
@@ -386,16 +385,16 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # act_hi_targ = tf.clip_by_value(act_hi_targ, action_space[0], action_space[1]) # equivalent to periodic subgoals
             act_hi_targ = tf.minimum(s_high, tf.maximum(s_low, act_hi_targ)) # equivalent to periodic subgoals
             # target Q-values, using action from target policy
-            _, q1_targ_hi, q2_targ_hi, _ = manager_actor_critic(stt1_ph, dg1_ph, act_hi_targ, aux_ph, action_space=sub_goal_space)
+            _, q1_targ_hi, q2_targ_hi, _, _ = manager_actor_critic(stt1_ph, dg1_ph, act_hi_targ, aux_ph, action_space=None)
 
     # define operations for training low-level policy : SAC
     with tf.variable_scope('controller'):
         with tf.variable_scope('main'):
-            mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, q2_pi_lo, v_lo = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=action_space)
+            mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, q2_pi_lo, v_lo, reg_losses = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
 
         # Target value network
         with tf.variable_scope('target'):
-            _, _, _, _, _, _, _, v_targ_lo  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=action_space)
+            _, _, _, _, _, _, _, v_targ_lo, _  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
 
     # Experience buffer for seperate controller and manager
     controller_buffer = ReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=ctrl_replay_size)
@@ -410,6 +409,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         backup_hi = tf.stop_gradient(rew_ph_hi + gamma*(1-dn_ph)*min_q_targ_hi)
         # Losses for TD3
         pi_loss_hi = -tf.reduce_mean(q1_pi_hi)
+        pi_loss_hi += pi_reg_hi*reg_param['lam_mean'] # regularization loss for the actor
         q1_loss_hi = tf.reduce_mean((q1_hi-backup_hi)**2)
         q2_loss_hi = tf.reduce_mean((q2_hi-backup_hi)**2)
         q_loss_hi = q1_loss_hi + q2_loss_hi
@@ -427,6 +427,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
         # Soft actor-critic losses
         pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
+        pi_loss_lo += reg_losses['preact_reg']*reg_param['lam_mean']  # regularization losses for the actor
+        pi_loss_lo += reg_losses['std_reg']*reg_param['lam_std']
         q1_loss_lo = 0.5 * tf.reduce_mean((q_backup_lo - q1_lo)**2)
         q2_loss_lo = 0.5 * tf.reduce_mean((q_backup_lo - q2_lo)**2)
         v_loss_lo = 0.5 * tf.reduce_mean((v_backup_lo - v_lo)**2)
@@ -474,8 +476,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # Polyak averaging for target variables
         target_update_hi = tf.group([tf.assign(v_targ, polyak*v_targ + (1-polyak)*v_main)
                                 for v_main, v_targ in zip(get_vars('manager/main'), get_vars('manager/target'))])
-        step_hi_ops = [pi_loss_hi, q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, 
-                    train_pi_hi_op, train_q_hi_op, target_update_hi]
+        step_hi_q_ops = [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, 
+                        train_q_hi_op]
+        step_hi_pi_ops = [pi_loss_hi, train_pi_hi_op, target_update_hi]
+        step_hi_ops = {'q_ops': step_hi_q_ops, 'pi_ops':step_hi_pi_ops}
         monitor_hi_ops = [pi_hi_summary_op, v_hi_summary_op]
         # step_hi_ops += monitor_hi_ops
         rospy.loginfo("conputational ops for manager are instantiated")
@@ -649,7 +653,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         des_goal = normalize_observation(full_stt=des_goal.reshape((-1,des_goal_dim)))
         return sess.run(mu_hi, feed_dict={stt_ph: state,    
                                           dg_ph: des_goal})
-    def train_low_level_controller(train_ops, buffer, ep_len=max_ep_len, batch_size=batch_size, discount=gamma, polyak=polyak):
+    def train_low_level_controller(train_ops, buffer, ep_len=max_ep_len, batch_size=batch_size, discount=gamma, polyak=polyak, step=0):
         """ train low-level actor-critic for each episode's timesteps
         TODO: determine what arguments to be parsed for this function.
         ops for low-level controller
@@ -687,7 +691,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # logging
             wandb.log({'policy_loss_lo': low_outs[0], 'q1_loss_lo': low_outs[1],
                         'q2_loss_lo': low_outs[2], 'v_loss_lo': low_outs[3],
-                        'q1_lo': low_outs[4], 'q2_lo': low_outs[5], 'v_lo': low_outs[6]})
+                        'q1_lo': low_outs[4], 'q2_lo': low_outs[5], 'v_lo': low_outs[6], 'step': step})
 
     def off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=100, discount=gamma, polyak=polyak):
         """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
@@ -767,7 +771,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # shape of the candidates (batch, n_cands, goal_dim)
         return candidates[np.arange(batch_size),max_indicies] # [for each batch, max index]
 
-    def train_high_level_manager(train_ops, buffer, ep_len=(max_ep_len/manager_propose_freq), batch_size=batch_size, discount=gamma, polyak=polyak):
+    def train_high_level_manager(train_ops, buffer, ep_len=(max_ep_len/manager_propose_freq), batch_size=batch_size, discount=gamma, polyak=polyak, step=0):
         """ train high-level actor-critic for each episode's (timesteps/manager_train_freq)
         TODO: determine what arguments to be parsed for this function.
         ops for high-level controller -> must in order for TD3 leanring.
@@ -790,7 +794,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         corr_subgoals = off_policy_correction(subgoals= batch['acts'],s_seq= batch['st_seq'],
         # shape of corr_subgoals (batch_size, goal_dim)
         o_seq= batch['ot_seq'], a_seq= batch['at_seq'])
-        manager_ops = train_ops
+        q_ops = train_ops['q_ops'] # {'q_ops': step_hi_q_ops, 'pi_ops':step_hi_pi_ops}
         # action of the manager is subgoal...
         man_feed_dict = {stt_ph: normalize_observation(full_stt=batch['st']),
                          stt1_ph: normalize_observation(full_stt=batch['st1']),
@@ -802,11 +806,15 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                          rew_ph_hi: batch['rews'],
                          dn_ph: batch['done'],
                         }
-        high_outs = sess.run(manager_ops, man_feed_dict)
+        q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
+        pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
+        q_hi_outs = sess.run(q_ops, man_feed_dict)
+        if step % delayed_update_freq ==0: # delayed update of the policy and target nets.
+            pi_hi_outs = sess.run(pi_ops, man_feed_dict)
+            wandb.log({'policy_loss_hi': pi_hi_outs[0]})
         # logging
-        wandb.log({'policy_loss_hi': high_outs[0], 'q1_loss_hi': high_outs[1],
-                    'q1_loss_hi': high_outs[2], 'v_loss_hi': high_outs[3],
-                    'q1_hi': high_outs[4], 'q1_hi': high_outs[5], 'v_hi': high_outs[6]})
+        wandb.log({'q1_hi': q_hi_outs[0], 'q2_hi': q_hi_outs[1], 'q1_loss_hi': q_hi_outs[2],
+                     'q2_loss_hi': q_hi_outs[3], 'q_hi': q_hi_outs[4], 'step': step})
 
     def normalize_observation(full_stt=None, c_obs=None, aux=None, act=None):
         """ normalizes observations for each step based on running mean-std.
@@ -846,30 +854,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # how demo transition consists of
     # obs_t,  stt_t, act_t,   rew_t, obs_t+1, stt_t+1, done
 
-    # How should I merge demo acquisition to HIRO architecture?
-    if os.path.exists(DEMO_DIR+DEMO_DATA) and not train_indicator and DEMO_USE:
-        print ('initialize the replay buffer with demo data')
-        with open(DEMO_DATA, 'rb') as f:
-            dagger = pickle.load(f)
-            for idx, item in enumerate(dagger):
-                if idx%100 ==0:
-                    print (item[0].shape)
-                    print (item[1].shape)
-                    print (item[2].shape)
-                    print (item[4].shape)
-                    print (item[5].shape)
-                replay_buffer.store(item[0],item[1],item[2],item[3],item[4],item[5],item[6]) 
-            print (idx, 'data has retrieved')
-
-    USE_PRETRAINED = False
-
-    if train_indicator and USE_PRETRAINED: # test time >>> load weight 
-        print ("LOADS TRAINED POLICY OF SAC")
-        logger.load_weight(SAC_PI_MODEL_LOADDIR, sess=sess,var_list=get_vars('main/pi'))
-        # logger.load_weight(SAC, sess=sess,var_list=get_vars('v'))
-        print ("=======================================================")
-        print ("SUCCESSFULLY LOADED PRE-TRAINED POLICY")
-        print ("=======================================================")
+    # TODO: implement demo acquisition into the buffer
+    # TODO: implement usage of pre-trained network
 
     if noise_type == "normal":
         subgoal_noise = Gaussian(mu=np.zeros(sub_goal_dim), sigma=noise_stddev*np.ones(sub_goal_dim))
@@ -878,85 +864,61 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
     start_time = time.time()
     ep_ret, ep_len = 0, 0
-    rew, dn = 0, False
-
-    total_steps = steps_per_epoch * epochs
-    t = 0
-    timesteps_since_manager = 0
-    timesteps_since_subgoal = 0
-    episode_num = 0
-    ep_timesteps = 0
+    total_steps = steps_per_epoch * epochs # total interaction steps in terms of training.
+    t = 0 # counted steps [0:total_steps - 1]
+    timesteps_since_manager = 0 # to count c-step elapse for training manager
+    timesteps_since_subgoal = 0 # to count c-step elapse for subgoal proposal
+    episode_num = 0 # incremental episode counter
     done = True
     reset = False
-    manager_transition = list()
-    controller_transition = list()
-    if train_indicator:
+    manager_temp_transition = list() # temp manager transition
+    controller_transition = list() # temp controller transition
+    if train_indicator: # train
         saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
-    else:
+    else: # test
         rospy.logwarn('Now loads the pretrained weight for test')
         new_saver = tf.train.import_meta_graph(os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-5000.meta')
         new_saver.restore(sess, os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-5000')
     # Main loop: collect experience in env and update/log each epoch
     while not rospy.is_shutdown() and t <int(total_steps):
-    # for t in range(total_steps):
-        """
-        Until start_steps have elapsed, randomly sample actions
-        from a uniform distribution for better exploration. Afterwards, 
-        use the learned policy. => Is it really necessary?
-        """
-        # for t in range(local_steps_per_epoch):
-        # if t % manager_propose_freq == 0:
-        if (done or reset):
-            # for every c-step, train controller c-iters and manager 1-iter
-            if t != 0 and not reset and train_indicator:
-                # 1) Add manager transition to buffer.
-                # manager_buffer.add_episode()
-
-                # 2) train low-level policy for episode timesteps
-                # train_low(for epi_timesteps) # step_hi_ops
-                train_low_level_controller(train_ops=step_lo_ops, buffer=controller_buffer, ep_len=ep_timesteps)
+        if done or ep_len== max_ep_len: # if an episode is finished (no matter done==True)
+            if t != 0 and train_indicator:
+                # train_low level controllers for the length of this episode
+                train_low_level_controller(train_ops=step_lo_ops, buffer=controller_buffer, ep_len=ep_len, step=t)
         
-                # 3) train high-level manager policy in delayed manner.
+                # train high-level manager policy in delayed manner.
                 if timesteps_since_manager >= train_manager_freq:
                     timesteps_since_manager = 0
-                    train_high_level_manager(train_ops=step_hi_ops, buffer=manager_buffer, ep_len=int(ep_timesteps/train_manager_freq))
+                    train_high_level_manager(train_ops=step_hi_ops, buffer=manager_buffer, ep_len=int(ep_len/train_manager_freq), step=t)
 
-                # 0. obs_t, 1. obs_t+c, 2. stt_t, 3. stt_t+c, 4.dg_t, 5.sg_t(action), 6.R_t, 7. done, 8. obs_seq, 9. stt_seq, 10. act_seq
-                # manager_temp_transition = [_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done ]
-                
-                # Process final state/obs, store manager transition, if it was not just created
+                # Process final state/obs, store manager transition i.e. state/obs @ t+c
                 if len(manager_temp_transition[2]) != 1:
-                #                                   0       1    2      3      4        5       6     7     8     9     10    11     12  13    
-                    # buffer store arguments :    s_seq, o_seq, a_seq, obs,  obs_1,     dg,    dg_1, stt, stt_1, act,  aux, aux_1,  rew, done 
-                    manager_temp_transition[4] = c_obs # save s_t+c
+                    #                               0       1    2      3    4     5    6     7     8     9     10    11     12    13    
+                    # buffer store arguments :    s_seq, o_seq, a_seq, obs, obs_1, dg,  dg_1, stt, stt_1, act,  aux, aux_1,  rew, done 
+                    manager_temp_transition[4] = c_obs # save o_t+c
                     manager_temp_transition[8] = full_stt # save s_t+c
-                    manager_temp_transition[-1] = float(True) # done = True since c-step has passed?
-            
-                # every manager transition should have the same length of sequence -> append unnecesary data to sequences
+                    manager_temp_transition[11] = aux # save aux_t+c
+                    manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode
+                # make sure every manager transition have the same length of sequence
                 # TODO: debug here...
-                if len(manager_temp_transition[0]) <= manager_propose_freq:
+                if len(manager_temp_transition[0]) <= manager_propose_freq: # len(state_seq) = propose_freq +1 since we save s_t:t+c as a seq.
                     while len(manager_temp_transition[0]) <= manager_propose_freq:
                         manager_temp_transition[0].append(full_stt) # s_seq
                         manager_temp_transition[1].append(c_obs) # o_seq
                         manager_temp_transition[2].append(action) # a_seq
-
                 # buffer store arguments : s_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done 
                 manager_buffer.store(*manager_temp_transition) # off policy correction is done inside the manager_buffer 
-            
-            
-    
-            # reset environment
+                      
+            # reset the environment since an episode has been finished
             obs = env.reset() #'observation', 'desired_goal', g_des -> task specific goal!
             done = False
             reset = False
-            c_step_reward = 0
-            ep_len = 0
-            ep_ret = 0
-            ep_low_ret = 0
-            ep_timesteps = 0
+            ep_len = 0 # length of the episode
+            ep_ret = 0 # episode return for the manager
+            ep_low_ret = 0 # return of the intrinsic reward for low level controller 
             episode_num += 1 # for every env.reset()
 
-
+            # process observations
             full_stt = np.concatenate(obs['observation']['full_state'], axis=0) # s_0
             c_obs = obs['observation']['color_obs'] #o_0
             des_goal = np.concatenate(obs['desired_goal']['full_state'], axis=0) # g_des
@@ -978,11 +940,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         else:
             action = get_action(c_obs, subgoal, deterministic= not train_indicator) # a_t
             action = np.squeeze(action) # (1,8) -> (8,): stochastic action
-            action[-1] = reloc_rescale_gripper(action[-1])
-            action[0] *= 0.1
-            action[1] *= 0.1
-            action[3] *= -0.2
-            action *= 0.1
+            # TODO: make action on the gripper as categorical policy
+            # action[-1] = reloc_rescale_gripper(action[-1])
         next_obs, manager_reward, done = env.step(action) # reward R_t-> for high-level manager -> for sum(R_t:t+c-1)
         if train_indicator:
             randomize_world()
@@ -992,6 +951,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # that isn't based on the agent's state) -> if done = False for the max_timestep
         # DO NOT Make done = True when it hits timeout
         ep_len += 1
+        ep_ret += manager_reward # reward in terms of achieving episodic task
         done, reset = False, True if ep_len== max_ep_len else done
         
 
@@ -999,15 +959,15 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         next_c_obs = next_obs['observation']['color_obs'] #o_t
         next_aux = obs['auxiliary'] # g_des
 
-        # append manager transition
         if train_indicator:
+            # append manager transition
             manager_temp_transition[-1] = float(True)
             manager_temp_transition[-2] += manager_reward # sum(R_t:t+c)
             manager_temp_transition[0].append(next_full_stt) # append s_seq
             manager_temp_transition[1].append(next_c_obs) # append o_seq
             manager_temp_transition[2].append(action)     # append a_seq
         
-        # compute intrinsic reward
+            # compute intrinsic reward
             intrinsic_reward = env.compute_intrinsic_reward(full_stt, next_full_stt, subgoal)
 
         # subgoal transition
@@ -1021,58 +981,37 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # update observations and subgoal
         obs = next_obs
         subgoal = next_subgoal
-        aux
+        aux = next_aux
 
         # update logging steps
-        ep_timesteps +=1
         ep_len += 1
         t +=1
         timesteps_since_manager += 1
         timesteps_since_subgoal += 1
 
-            # Super critical, easy to overlook step: make sure to update 
-            # most recent observation!
-            # Store experience to replay buffer
         if train_indicator:        
             if timesteps_since_subgoal % manager_propose_freq == 0:
-                # Finish, add transition
-
-
-                manager_temp_transition[4] = c_obs # save s_t+c
+                # for every c-step, renew the subgoal estimation from the manager policy.
+                timesteps_since_subgoal = 0
+                manager_temp_transition[4] = c_obs # save o_t+c
                 manager_temp_transition[8] = full_stt # save s_t+c
-                manager_temp_transition[-1] = float(True) # done = True since c-step has passed?
+                manager_temp_transition[11] = aux # save aux_t+c
+                manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode 
                 
-                # manager_temp_transition[0].append(next_full_stt) # append s_seq
-                # manager_temp_transition[1].append(next_c_obs) # append o_seq
-                # manager_temp_transition[2].append(action)     # append a_seq
+                # intentional seq appending is not required here since it always satisfies c step.
+
 
                 manager_buffer.store(*manager_temp_transition)
 
                 subgoal = get_subgoal(full_stt, des_goal) # action_dim = (1, stt_dim) -> defaults to 25-dim
                 _subgoal_noise = subgoal_noise() # random sample when called
                 subgoal += _subgoal_noise
-                timesteps_since_subgoal = 0
-                # Create a high level transition
-
+                # Create a high level transition : note that the action of manager policy is subgoal
+                # buffer store arguments :    s_seq,    o_seq, a_seq, obs,  obs_1,     dg,    dg_1,      stt, stt_1, act,  aux, aux_1,  rew, done 
                 manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
 
             if t % save_freq == 0 and train_indicator:
-                rospy.loginfo('##### saves manager network weights ##### for step %d', t)
-                # logger.save_weight(MAN_PI_MODEL_SAVEDIR, sess=sess, 
-                #     var_list=get_vars('manager/main/pi'), step=t)
-                # logger.save_weight(MAN_QF1_MODEL_SAVEDIR, sess=sess, 
-                #     var_list=get_vars('manager/main/q1'), step=t)
-                # logger.save_weight(MAN_QF2_MODEL_SAVEDIR, sess=sess, 
-                #     var_list=get_vars('manager/main/q2'), step=t)
-                rospy.loginfo('##### saves controller network weights ##### for step %d', t)
-                # logger.save_weight(CTRL_PI_MODEL_LOADDIR, sess=sess, 
-                #     var_list=get_vars('controller/main/pi'), step=t)
-                # logger.save_weight(CTRL_VF_MODEL_LOADDIR, sess=sess, 
-                #     var_list=get_vars('controller/main/v'), step=t)
-                # logger.save_weight(CTRL_QF1_MODEL_LOADDIR, sess=sess, 
-                #     var_list=get_vars('controller/main/q1'), step=t)
-                # logger.save_weight(CTRL_QF2_MODEL_LOADDIR, sess=sess, 
-                #     var_list=get_vars('controller/main/q2'), step=t)
+                rospy.loginfo('##### saves network weights ##### for step %d', t)
                 saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
                 saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac.ckpt'), global_step=t)  
 
