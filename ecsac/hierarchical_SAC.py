@@ -24,6 +24,7 @@ from her import Her_sampler
 from OU import OU
 from Gaussian import Gaussian
 from collections import OrderedDict
+from state_action_space import *
 
 import wandb
 wandb.init(project="hiro-ecsac")
@@ -109,49 +110,6 @@ class ReplayBuffer(object):
                     aux1=self.aux1_buf[idxs],
                     )
 
-    def append_ag_terminal(self, ag_terminal):
-        """Append achieved goal @ terminal state.
-        It won't be necessary in HIRO implementation.
-        """
-        # self.ep_ag_1 = self.ep_ag[1:]
-        # self.ep_ag_1.append(ag_terminal)
-        pass
-
-    def add_episode_to_buffer(self, episode_batch):
-        """Add whole episodic transitions to batch."""
-        # ep_obs, ep_obs_1, ep_stt, ep_stt_1, ep_agobs, ep_agobs_1, ep_agstt, ep_agstt_1, ep_dgobs, ep_dgstt, ep_act, ep_rew, ep_dn = episode_batch
-        
-        # ep_obs = np.array(ep_obs)
-        # ep_obs_1 = np.array(ep_obs_1)
-        # ep_stt = np.array(ep_stt)
-        # ep_stt_1 = np.array(ep_stt_1)
-        # ep_agobs = np.array(ep_agobs)
-        # ep_agobs_1 = np.array(ep_agobs_1)
-        # ep_agstt = np.array(ep_agstt)
-        # ep_agstt_1 = np.array(ep_agstt_1)
-        # ep_dgobs = np.array(ep_dgobs)
-        # ep_dgstt = np.array(ep_dgstt)
-        # ep_act= np.array(ep_act)
-        # ep_rew = np.array(ep_rew)
-        # ep_dn = np.array(ep_dn)
-
-        # batch_size = ep_obs.shape[0]
-        # with self.lock:
-        #     # store the informations
-        #     for idx, data in enumerate(zip(ep_obs, ep_obs_1, ep_stt, ep_stt_1, ep_agobs, ep_agobs_1, ep_agstt, ep_agstt_1, ep_dgobs, ep_dgstt, ep_act, ep_rew, ep_dn)):
-        #         self.buffer.append(data)
-        pass
-
-    def execute_goal_strategy(self, episode_batch):
-        """Normalise the observations batch by batch."""
-        # ep_obs, ep_obs_1, ep_stt, ep_stt_1, ep_agobs, ep_agobs_1, ep_agstt, ep_agstt_1, ep_dgobs, ep_dgstt, ep_act, ep_rew, ep_dn = episode_batch
-        
-        # # get the number of normalization transitions
-        # num_transitions = ep_obs.shape[0] # for all transitions 
-        # # HER substitution for all transitions
-        # transitions = self.her_sampler.sample_her_transitions(episode_batch, num_transitions)
-        pass
-
 class ManagerReplayBuffer(ReplayBuffer):
     """
     A simple FIFO experience replay buffer for ECSAC + HIRO agents.
@@ -201,49 +159,6 @@ class ManagerReplayBuffer(ReplayBuffer):
                     ot_seq=self.obs_seq_buf[idxs],
                     at_seq=self.act_seq_buf[idxs])
 
-    def append_ag_terminal(self, ag_terminal):
-        """Append achieved goal @ terminal state.
-        It won't be necessary in HIRO implementation.
-        """
-        # self.ep_ag_1 = self.ep_ag[1:]
-        # self.ep_ag_1.append(ag_terminal)
-        pass
-
-    def add_episode_to_buffer(self, episode_batch):
-        """Add whole episodic transitions to batch."""
-        # ep_obs, ep_obs_1, ep_stt, ep_stt_1, ep_agobs, ep_agobs_1, ep_agstt, ep_agstt_1, ep_dgobs, ep_dgstt, ep_act, ep_rew, ep_dn = episode_batch
-        
-        # ep_obs = np.array(ep_obs)
-        # ep_obs_1 = np.array(ep_obs_1)
-        # ep_stt = np.array(ep_stt)
-        # ep_stt_1 = np.array(ep_stt_1)
-        # ep_agobs = np.array(ep_agobs)
-        # ep_agobs_1 = np.array(ep_agobs_1)
-        # ep_agstt = np.array(ep_agstt)
-        # ep_agstt_1 = np.array(ep_agstt_1)
-        # ep_dgobs = np.array(ep_dgobs)
-        # ep_dgstt = np.array(ep_dgstt)
-        # ep_act= np.array(ep_act)
-        # ep_rew = np.array(ep_rew)
-        # ep_dn = np.array(ep_dn)
-
-        # batch_size = ep_obs.shape[0]
-        # with self.lock:
-        #     # store the informations
-        #     for idx, data in enumerate(zip(ep_obs, ep_obs_1, ep_stt, ep_stt_1, ep_agobs, ep_agobs_1, ep_agstt, ep_agstt_1, ep_dgobs, ep_dgstt, ep_act, ep_rew, ep_dn)):
-        #         self.buffer.append(data)
-        pass
-
-    def execute_goal_strategy(self, episode_batch):
-        """Normalise the observations batch by batch."""
-        # ep_obs, ep_obs_1, ep_stt, ep_stt_1, ep_agobs, ep_agobs_1, ep_agstt, ep_agstt_1, ep_dgobs, ep_dgstt, ep_act, ep_rew, ep_dn = episode_batch
-        
-        # # get the number of normalization transitions
-        # num_transitions = ep_obs.shape[0] # for all transitions 
-        # # HER substitution for all transitions
-        # transitions = self.her_sampler.sample_her_transitions(episode_batch, num_transitions)
-        pass
-
 """
 
 Midified Soft Actor-Critic
@@ -255,9 +170,6 @@ Added hierarchical learning + learnable temperature (alpha).
 """
 
 def update_summary(summary_writer = None, pi_summray_str=None, v_summray_str=None, global_step=None):
-    # self.summar/y_writer = summary_writer
-    # summary_str = sess.run(summary_op)
-    # summary_writer.add_summary(summary_str, i + 1)
         pi_summary_str = pi_summray_str
         v_summary_str = v_summray_str
         summary_writer.add_summary(pi_summary_str, global_step)
@@ -344,7 +256,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     seed=0 
     steps_per_epoch=1000
     epochs=100
-    save_freq = 5e3
+    save_freq = 1e3
     ctrl_replay_size=int(5e4) # Memory leakage?
     man_replay_size=int(5e4) # Memory leakage?
     gamma=0.99 # for both hi & lo level policies
@@ -435,91 +347,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         des_goal_dim += grip_dim
         sub_goal_dim += grip_dim
    
-    # state space upper/lower limits ...
-    # define the state-space -> rescale & relocate the subgoal estimation
-
-    ee_pos = {'x':{'lo': 0.3397,'mean': 0.5966,'hi': 0.9697},
-              'y':{'lo': -0.3324,'mean': 0.0274,'hi': 0.3162},
-              'z':{'lo': 0.0200,'mean': 0.1081,'hi': 0.7638}}
-
-    ee_quat = {'x':{'lo': -0.0734,'mean': 0.9710,'hi': 1.0000},
-               'y':{'lo': -0.4876,'mean': -0.0196,'hi': 0.2272},
-               'z':{'lo': -0.3726,'mean': -0.0222,'hi': 0.6030},
-               'w':{'lo': -0.9128,'mean': 0.0462,'hi': 0.9398}}
-
-    # roll should be considered for its absolute value (2.8~3.14)
-    # should compare with absolute value of the roll
-    # TODO: if ee_quat is not effective, replace it with ee_rpy
-    ee_rpy = {'r':{'lo': 2.8000,'mean': 3.0000,'hi': 3.1400},
-              'p':{'lo': -0.4000,'mean': 0.0,'hi': 0.4000},
-              'y':{'lo': -0.4500,'mean': 0.0,'hi': 0.4500}}
-
-    joint_p = {'j1':{'lo': -0.6110,'mean': 0.000,'hi': 0.6110},
-               'j2':{'lo': -1.1530,'mean': -0.7750,'hi': 0.0000},
-               'j3':{'lo': -1.6550,'mean': -0.321,'hi': 0.0000},
-               'j4':{'lo': 0.5186,'mean': 1.1511,'hi': 2.191},
-               'j5':{'lo': -1.369,'mean': 0.0123,'hi': 1.4400},
-               'j6':{'lo': -1.538,'mean': 0.7484,'hi': 1.3150},
-               'j7':{'lo': -2.500,'mean': -1.804,'hi': -1.00}}
-    # joint vels and efforts when imobile
-    # velocity: [-0.001, -0.001, -0.001, -0.001, -0.001, -0.001, -0.001]
-    # effort: [0.156, -30.78, -6.676, -9.88, 2.444, 0.2, 0.12]
-
-    joint_v = {'j1':{'lo': -1.000,'mean': 0.000,'hi': 1.000},
-               'j2':{'lo': -0.6000,'mean': 0.000,'hi': 0.6000},
-               'j3':{'lo': -1.655,'mean': -0.321,'hi': 0.0000},
-               'j4':{'lo': -1.000,'mean': 0.000,'hi': 1.000},
-               'j5':{'lo': -1.200,'mean': 0.000,'hi': 1.200},
-               'j6':{'lo': -1.500,'mean': 0.000,'hi': 1.000},
-               'j7':{'lo': -2.200,'mean': 0.000,'hi': 1.900}}
-    
-    joint_e = {'j1':{'lo': -2.500,'mean': 0.000,'hi': 2.500},
-               'j2':{'lo': -42.00,'mean': -30.00,'hi': -14.83},
-               'j3':{'lo': -15.63,'mean': -6.676,'hi': -1.564},
-               'j4':{'lo': -15.74,'mean': -10.22,'hi': 0.200},
-               'j5':{'lo': -2.412,'mean': 2.000,'hi': 3.312},
-               'j6':{'lo': -1.100,'mean': 0.200,'hi': 2.520},
-               'j7':{'lo': -0.700,'mean': 0.05,'hi': 1.228}}
-
-    grip_pos = {'pos':{'lo': 0.0,'mean': 0.022,'hi': 0.044}}
-
-
-    act_space = {'j1':{'lo': -0.850,'mean': 0.000,'hi': 0.850},
-                   'j2':{'lo': -0.800,'mean': -0.100,'hi': 0.650},
-                   'j3':{'lo': -0.600,'mean': -0.300,'hi': 0.630},
-                   'j4':{'lo': -0.870,'mean': 0.000,'hi': 0.800},
-                   'j5':{'lo': -1.200,'mean': 0.000,'hi': 1.200},
-                   'j6':{'lo': -1.500,'mean': 0.000,'hi': 1.500},
-                   'j7':{'lo': -1.500,'mean': 0.000,'hi': 1.500},
-                   'grip':{'lo': -1.500,'mean': 0.000,'hi': 1.500}}
-
-
-    # TODO: check if state space for the aux info is
-    # sub_goal_space = dict(ee_pos=ee_pos, ee_quat=ee_quat, ee_rpy=ee_rpy,
-    #                   joint_p=joint_p, joint_v=joint_v, joint_e=joint_e)
-
-    # state order should be equivalent to full_stt
-    sub_goal_space = dict(joint_p=joint_p, joint_v=joint_v, joint_e=joint_e,
-                      grip_pos=grip_pos, ee_pos=ee_pos, ee_quat=ee_quat)
-
-    min_tensor = [joint_p['j1']['lo'], joint_p['j2']['lo'], joint_p['j3']['lo'], joint_p['j4']['lo'], joint_p['j5']['lo'], joint_p['j6']['lo'], joint_p['j7']['lo'],
-                  joint_v['j1']['lo'], joint_v['j2']['lo'], joint_v['j3']['lo'], joint_v['j4']['lo'], joint_v['j5']['lo'], joint_v['j6']['lo'], joint_v['j7']['lo'],
-                  joint_e['j1']['lo'], joint_e['j2']['lo'], joint_e['j3']['lo'], joint_e['j4']['lo'], joint_e['j5']['lo'], joint_e['j6']['lo'], joint_e['j7']['lo'],
-                  grip_pos['pos']['lo'], ee_pos['x']['lo'], ee_pos['y']['lo'], ee_pos['z']['lo'], ee_quat['x']['lo'], ee_quat['y']['lo'], ee_quat['z']['lo'], ee_quat['w']['lo']]
-    
-    max_tensor = [joint_p['j1']['hi'], joint_p['j2']['hi'], joint_p['j3']['hi'], joint_p['j4']['hi'], joint_p['j5']['hi'], joint_p['j6']['hi'], joint_p['j7']['hi'],
-                  joint_v['j1']['hi'], joint_v['j2']['hi'], joint_v['j3']['hi'], joint_v['j4']['hi'], joint_v['j5']['hi'], joint_v['j6']['hi'], joint_v['j7']['hi'],
-                  joint_e['j1']['hi'], joint_e['j2']['hi'], joint_e['j3']['hi'], joint_e['j4']['hi'], joint_e['j5']['hi'], joint_e['j6']['hi'], joint_e['j7']['hi'],
-                  grip_pos['pos']['hi'], ee_pos['x']['hi'], ee_pos['y']['hi'], ee_pos['z']['hi'], ee_quat['x']['hi'], ee_quat['y']['hi'], ee_quat['z']['hi'], ee_quat['w']['hi']] 
-
- 
-    # mean = np.array(mean).reshape(1,-1)
-    # scale = np.array(scale).reshape(1,-1)
-    # action = action * scale + mean
-
-
-    action_space = act_space
-
     # Inputs to computation graph -> placeholders for next goal state is necessary.
     obs_ph = tf.placeholder(dtype=tf.float32, shape=(None,)+obs_dim) # o_t : low_level controller
     obs1_ph = tf.placeholder(dtype=tf.float32, shape=(None,)+obs_dim) # o_t+1 : low_level controller
@@ -557,7 +384,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             epsilon = tf.clip_by_value(epsilon, -manager_noise_clip, manager_noise_clip)
             act_hi_targ = mu_hi_targ + epsilon
             # act_hi_targ = tf.clip_by_value(act_hi_targ, action_space[0], action_space[1]) # equivalent to periodic subgoals
-            act_hi_targ = tf.minimum(max_tensor, tf.maximum(min_tensor, act_hi_targ)) # equivalent to periodic subgoals
+            act_hi_targ = tf.minimum(s_high, tf.maximum(s_low, act_hi_targ)) # equivalent to periodic subgoals
             # target Q-values, using action from target policy
             _, q1_targ_hi, q2_targ_hi, _ = manager_actor_critic(stt1_ph, dg1_ph, act_hi_targ, aux_ph, action_space=sub_goal_space)
 
@@ -809,8 +636,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # sub_goal, obs = normalize_observation(full_stt=subgoal.reshape((-1,)+subgoal.shape), c_obs=obs.reshape((-1,)+obs.shape))
         sub_goal, obs = normalize_observation(full_stt=sub_goal.reshape((-1,sub_goal_dim)), c_obs=obs.reshape((-1,)+obs_dim))
         # TODO: resolve shape mismatching issue
-        # return normalize_action(sess.run(act_op, feed_dict={obs_ph: obs,
-        #                                    sg_ph: sub_goal}), space=action_space, batch_size=obs.shape[0]) # select action from single obs
         return sess.run(act_op, feed_dict={obs_ph: obs,
                                            sg_ph: sub_goal})
     def get_subgoal(state, des_goal):
@@ -822,8 +647,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # des_goal = normalize_observation(full_stt=des_goal.reshape((-1,)+des_goal.shape))
         state = normalize_observation(full_stt=state.reshape((-1, stt_dim)))
         des_goal = normalize_observation(full_stt=des_goal.reshape((-1,des_goal_dim)))
-        # return normalize_subgoal(sess.run(mu_hi, feed_dict={stt_ph: state,    
-        #                                   dg_ph: des_goal}), space=sub_goal_space, batch_size=state.shape[0])
         return sess.run(mu_hi, feed_dict={stt_ph: state,    
                                           dg_ph: des_goal})
     def train_low_level_controller(train_ops, buffer, ep_len=max_ep_len, batch_size=batch_size, discount=gamma, polyak=polyak):
@@ -1067,7 +890,12 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     reset = False
     manager_transition = list()
     controller_transition = list()
-    saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
+    if train_indicator:
+        saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
+    else:
+        rospy.logwarn('Now loads the pretrained weight for test')
+        new_saver = tf.train.import_meta_graph(os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-5000.meta')
+        new_saver.restore(sess, os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-5000')
     # Main loop: collect experience in env and update/log each epoch
     while not rospy.is_shutdown() and t <int(total_steps):
     # for t in range(total_steps):
@@ -1078,9 +906,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         """
         # for t in range(local_steps_per_epoch):
         # if t % manager_propose_freq == 0:
-        if (done or reset) and train_indicator:
+        if (done or reset):
             # for every c-step, train controller c-iters and manager 1-iter
-            if t != 0 and not reset:
+            if t != 0 and not reset and train_indicator:
                 # 1) Add manager transition to buffer.
                 # manager_buffer.add_episode()
 
@@ -1128,6 +956,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             ep_timesteps = 0
             episode_num += 1 # for every env.reset()
 
+
             full_stt = np.concatenate(obs['observation']['full_state'], axis=0) # s_0
             c_obs = obs['observation']['color_obs'] #o_0
             des_goal = np.concatenate(obs['desired_goal']['full_state'], axis=0) # g_des
@@ -1144,14 +973,16 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # buffer store arguments :    s_seq,    o_seq, a_seq, obs,  obs_1,     dg,    dg_1,      stt, stt_1, act,  aux, aux_1,  rew, done 
             manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
 
-            randomize_world() # domain randomization
-
         if t < low_start_timesteps:
             action = sample_action(act_dim) # a_t
         else:
             action = get_action(c_obs, subgoal, deterministic= not train_indicator) # a_t
             action = np.squeeze(action) # (1,8) -> (8,): stochastic action
             action[-1] = reloc_rescale_gripper(action[-1])
+            action[0] *= 0.1
+            action[1] *= 0.1
+            action[3] *= -0.2
+            action *= 0.1
         next_obs, manager_reward, done = env.step(action) # reward R_t-> for high-level manager -> for sum(R_t:t+c-1)
         if train_indicator:
             randomize_world()
@@ -1225,7 +1056,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
                 manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
 
-            if t % save_freq == 0:
+            if t % save_freq == 0 and train_indicator:
                 rospy.loginfo('##### saves manager network weights ##### for step %d', t)
                 # logger.save_weight(MAN_PI_MODEL_SAVEDIR, sess=sess, 
                 #     var_list=get_vars('manager/main/pi'), step=t)
@@ -1261,4 +1092,4 @@ if __name__ == '__main__':
     from utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
     
-    ecsac(train_indicator=1,isReal=False, logger_kwargs=logger_kwargs) # 1 Train / 0 Test (@real)
+    ecsac(train_indicator=0, logger_kwargs=logger_kwargs) # 1 Train / 0 Test (@real)
