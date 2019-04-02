@@ -5,6 +5,9 @@ from collections import OrderedDict as od
 from state_action_space import *
 
 EPS = 1e-8
+CRIT_L2_REG = 1e-2
+init_scale=np.sqrt(2)
+kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=CRIT_L2_REG)
 
 def ortho_init(scale=1.0):
     """
@@ -72,13 +75,11 @@ def placeholders(*args):
 
 def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None, kernel_regularizer=None):
     regularizer = tf.contrib.layers.l2_regularizer(scale=0.1)
-    init_scale=np.sqrt(2)
     for h in hidden_sizes[:-1]:
         x = (tf.layers.dense(x, units=h, activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=ortho_init(init_scale)))
     return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_regularizer=kernel_regularizer, kernel_initializer=ortho_init(init_scale))
 
 def cnn_feature_extractor(x, activation=tf.nn.relu, kernel_regularizer=None):
-    init_scale=np.sqrt(2)
     x = tf.layers.conv2d(x, filters=32,kernel_size=8, strides=(4,4), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=ortho_init(init_scale), name='actor_conv1')
     x = tf.layers.conv2d(x, filters=64,kernel_size=4, strides=(2,2), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=ortho_init(init_scale), name='actor_conv2')
     x = tf.layers.conv2d(x, filters=64,kernel_size=3, strides=(1,1), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=ortho_init(init_scale), name='actor_conv3')
@@ -107,8 +108,6 @@ Policies
 
 LOG_STD_MAX = 2
 LOG_STD_MIN = -20
-
-
 
 
 def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation):
@@ -146,27 +145,57 @@ def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation):
 
 # from here are what's necessary for HIRO.
 
-# def mlp_categorical_policy(x, a, hidden_sizes, activation, output_activation, action_space):
-#     """ categorical policy for gripper control
-#     """
-#     act_dim = action_space.n
-#     logits = mlp(x, list(hidden_sizes)+[act_dim], activation, None)
-#     logp_all = tf.nn.log_softmax(logits)
-#     pi = tf.squeeze(tf.multinomial(logits,1), axis=1)
-#     logp = tf.reduce_sum(tf.one_hot(a, depth=act_dim) * logp_all, axis=1)
-#     logp_pi = tf.reduce_sum(tf.one_hot(pi, depth=act_dim) * logp_all, axis=1)
-#     return pi, logp, logp_pi
+def mlp_categorical_policy(x, a, hidden_sizes, activation, output_activation, action_space):
+    """ categorical policy for gripper control
+    """
+    act_dim = action_space.n
+    logits = mlp(x, list(hidden_sizes)+[act_dim], activation, None)
+    logp_all = tf.nn.log_softmax(logits)
+    pi = tf.squeeze(tf.multinomial(logits,1), axis=1)
+    logp = tf.reduce_sum(tf.one_hot(a, depth=act_dim) * logp_all, axis=1)
+    logp_pi = tf.reduce_sum(tf.one_hot(pi, depth=act_dim) * logp_all, axis=1)
+    return pi, logp, logp_pi
 
 def mlp_deterministic_policy(stt, goal, sub_goal, aux, activation=tf.nn.relu, hidden_sizes=(512,256,256), output_activation=tf.nn.tanh):
     """ policy for high-level manager, TD3 policy
     """
-    init_scale=np.sqrt(2)
     batch_size = sub_goal.shape.as_list()[0]
     sg_dim = sub_goal.shape.as_list()[-1]
     net = mlp(tf.concat([stt,goal], axis=-1), list(hidden_sizes), activation=activation, kernel_regularizer=None)
     mu = tf.layers.dense(net, sg_dim, activation=output_activation, kernel_initializer=ortho_init(init_scale))
 
     return mu, net, batch_size
+
+def cnn_gaussian_policy_with_logits(obs, act, goal, activation=tf.nn.relu, output_activation=None):
+    """ policy for low-level controller, SAC policy
+    Note that the gripper is actuated by categorical policy.
+    """
+    grip_dim = 2 # on/off
+    act_dim = act.shape.as_list()[-1]
+    log_alpha = tf.get_variable(name='log_alpha', initializer=0.0, dtype=np.float32)
+    _feat = cnn_feature_extractor(obs, activation)
+    _feat = tf.concat([_feat, goal], axis=-1)
+    _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=ortho_init(init_scale))
+    _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=ortho_init(init_scale))
+    # logit action for controlling gripper (on/off)
+    logits = tf.layers.dense(_feat, units=grip_dim, activation=activation, kernel_initializer=ortho_init(init_scale))
+    logp_g_all = tf.nn.log_softmax(logits)
+    # pi_g = tf.squeeze(tf.multinomial(logits,1), axis=1)
+    pi_g = tf.multinomial(logits,1)
+    pi_g_f = tf.cast(pi_g, tf.float32)
+    logp_pi_g = tf.reduce_sum(tf.one_hot(pi_g, depth=grip_dim) * logp_g_all, axis=1)
+
+    mu = tf.layers.dense(_feat, units=act_dim - 1, activation=output_activation, kernel_initializer=ortho_init(init_scale))
+    mu = mu * a_scale[:-1] + a_mean[:-1]
+    mu = tf.minimum(a_high[:-1], tf.maximum(a_low[:-1], mu))
+    log_std = tf.layers.dense(_feat, act_dim - 1, activation=tf.tanh)
+    log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1) #Squash & rescale log_std
+    std = tf.exp(log_std) # retrieve std
+    pi = mu + tf.random_normal(tf.shape(mu)) * std
+    pi = tf.minimum(a_high[:-1], tf.maximum(a_low[:-1], pi))
+    logp_pi = gaussian_likelihood(pi, mu, log_std)
+
+    return mu, pi, logp_pi, std, pi_g_f, logp_pi_g
 
 def cnn_gaussian_policy(obs, act, goal, activation=tf.nn.relu, output_activation=None):
     """ policy for low-level controller, SAC policy
@@ -177,7 +206,8 @@ def cnn_gaussian_policy(obs, act, goal, activation=tf.nn.relu, output_activation
     _feat = tf.concat([_feat, goal], axis=-1)
     _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=ortho_init(init_scale))
     _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=ortho_init(init_scale))
-    # parameterized mean and stddev
+    # logit action for controlling gripper (on/off)
+    
     mu = tf.layers.dense(_feat, act_dim, activation=output_activation)
     mu = mu * a_scale + a_mean
     mu = tf.minimum(a_high, tf.maximum(a_low, mu))
@@ -237,21 +267,22 @@ def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space=None, hidden
     return mu, q1, q2, q1_pi, preact_reg
 
 
-
 """
 Actor-Critics for controller class : mu_lo, stochastic policy
 """
 
 def cnn_controller_actor_critic(stt, obs, goal, act, aux, action_space=None, hidden_sizes=(512,256,256), activation=tf.nn.relu, 
-                     output_activation=None, policy=cnn_gaussian_policy, isCartesian=True):
+                     output_activation=None, policy=cnn_gaussian_policy_with_logits, isCartesian=True):
     """ Define actor-critic for controller policy ; actor: cnn critic: mlp
     """
     kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=0.01)
 
     # policy
     with tf.variable_scope('pi'):
-        _mu, _pi, _logp_pi, std = policy(obs, act, goal, activation, output_activation)
-        mu, pi, logp_pi = apply_squashing_func(mu, pi, logp_pi)
+        _mu, _pi, _logp_pi, std, pi_g, logp_pi_g = policy(obs, act, goal, activation, output_activation)
+        _mu, _pi, logp_pi = apply_squashing_func(_mu, _pi, _logp_pi)
+        mu = tf.concat([_mu, pi_g], axis=-1)
+        pi = tf.concat([_pi, pi_g], axis=-1)
 
     # poliy reg losses 
     preact_reg = tf.norm(_mu)
@@ -269,5 +300,34 @@ def cnn_controller_actor_critic(stt, obs, goal, act, aux, action_space=None, hid
     with tf.variable_scope('v'):
         v = vf_mlp(tf.concat([stt, goal, aux], axis=-1))
 
-    return mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, v, {'preact_reg':preact_reg, 'std_reg':std_reg}
+    return mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, v, pi_g, {'preact_reg':preact_reg, 'std_reg':std_reg}
 
+
+# def cnn_controller_actor_critic(stt, obs, goal, act, aux, action_space=None, hidden_sizes=(512,256,256), activation=tf.nn.relu, 
+#                      output_activation=None, policy=cnn_gaussian_policy, isCartesian=True):
+#     """ Define actor-critic for controller policy ; actor: cnn critic: mlp
+#     """
+#     kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=0.01)
+
+#     # policy
+#     with tf.variable_scope('pi'):
+#         _mu, _pi, _logp_pi, std = policy(obs, act, goal, activation, output_activation)
+#         mu, pi, logp_pi = apply_squashing_func(_mu, _pi, _logp_pi)
+
+#     # poliy reg losses 
+#     preact_reg = tf.norm(_mu)
+#     std_reg = tf.norm(std)
+#     # value ftns
+#     vf_mlp = lambda x : tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None, kernel_regularizer=kernel_regularizer), axis=1)
+#     with tf.variable_scope('q1'):
+#         q1 = vf_mlp(tf.concat([stt, goal, act, aux], axis=-1))
+#     with tf.variable_scope('q1', reuse=True): # same as TD3 value ftn for policy learning.
+#         q1_pi = vf_mlp(tf.concat([stt, goal, pi, aux], axis=-1))
+#     with tf.variable_scope('q2'):
+#         q2 = vf_mlp(tf.concat([stt, goal, act, aux], axis=-1))
+#     with tf.variable_scope('q2', reuse=True):
+#         q2_pi = vf_mlp(tf.concat([stt, goal, pi, aux], axis=-1))
+#     with tf.variable_scope('v'):
+#         v = vf_mlp(tf.concat([stt, goal, aux], axis=-1))
+
+#     return mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, v, {'preact_reg':preact_reg, 'std_reg':std_reg}

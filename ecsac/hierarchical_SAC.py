@@ -26,9 +26,9 @@ from Gaussian import Gaussian
 from collections import OrderedDict
 from state_action_space import *
 
-import wandb
-wandb.init(project="hiro-ecsac")
+from wandb.tensorflow import wandb
 
+wandb.init(project="hierarchical-sac")
 
 path = '/home/irobot/catkin_ws/src/ddpg/scripts/'
 log_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp'
@@ -198,7 +198,7 @@ def sample_action(action_dim):
     low = -1.0
     high = 1.0
     # high = high if self.dtype.kind == 'f' else self.high.astype('int64') + 1
-    return np.random.uniform(low=low, high=high, size=action_dim).astype('float32')
+    return np.concatenate([np.random.uniform(low=low, high=high, size=action_dim-1).astype('float32'), np.random.randint(2, size=1)], axis=-1)
 
     
 def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
@@ -247,7 +247,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     train_manager_freq= 10
     manager_train_start =50
     high_start_timesteps = 5e2 # timesteps for random high-policy
-    low_start_timesteps = 5000 # timesteps for random low-policy
+    low_start_timesteps = 0 # timesteps for random low-policy
     candidate_goals = 8
 
     # general hyper_params
@@ -390,11 +390,11 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # define operations for training low-level policy : SAC
     with tf.variable_scope('controller'):
         with tf.variable_scope('main'):
-            mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, q2_pi_lo, v_lo, reg_losses = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
+            mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, q2_pi_lo, v_lo, pi_g, reg_losses = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
 
         # Target value network
         with tf.variable_scope('target'):
-            _, _, _, _, _, _, _, v_targ_lo, _  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
+            _, _, _, _, _, _, _, v_targ_lo, _, _  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
 
     # Experience buffer for seperate controller and manager
     controller_buffer = ReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=ctrl_replay_size)
@@ -413,7 +413,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         q1_loss_hi = tf.reduce_mean((q1_hi-backup_hi)**2)
         q2_loss_hi = tf.reduce_mean((q2_hi-backup_hi)**2)
         q_loss_hi = q1_loss_hi + q2_loss_hi
-
+        l2_loss_hi = tf.losses.get_regularization_loss()
+        q_loss_hi += l2_loss_hi
     # low-level policy training based on SAC
     
     with tf.variable_scope('controller'):
@@ -433,6 +434,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         q2_loss_lo = 0.5 * tf.reduce_mean((q_backup_lo - q2_lo)**2)
         v_loss_lo = 0.5 * tf.reduce_mean((v_backup_lo - v_lo)**2)
         value_loss_lo = q1_loss_lo + q2_loss_lo + v_loss_lo # coeffs?
+        l2_loss_lo = tf.losses.get_regularization_loss()
+        value_loss_lo += l2_loss_lo
         alpha_loss_lo = tf.reduce_mean(-log_alpha_lo*tf.stop_gradient(logp_pi_lo+target_ent)) # why tf.stop_gradient here?
         # all losses make sense to me!
     rospy.loginfo("loss ops have been defined")
@@ -565,10 +568,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
     # setup statistics summary and normalizers 
     summary_manager = SummaryManager(sess=sess, obs_shape_list=obs_shape_list, summary_writer=summary_writer)
-    summary_manager.setup_state_summary()
-    summary_manager.setup_stat_summary()
-    summary_manager.setup_train_summary()
-    summary_manager.setup_sac_summary() # logs ppo specific values
+    # summary_manager.setup_state_summary()
+    # summary_manager.setup_stat_summary()
+    # summary_manager.setup_train_summary()
+    # summary_manager.setup_sac_summary() # logs ppo specific values
     # should make it more specific to HIRO architecture
 
     # Setup model saving
@@ -850,10 +853,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     DEMO_USE = False # DAgger should be reimplemented 
     # os.chdir(DEMO_DIR)
 
-    # FILL UP REPLAY BUFFER!
     # how demo transition consists of
     # obs_t,  stt_t, act_t,   rew_t, obs_t+1, stt_t+1, done
-
     # TODO: implement demo acquisition into the buffer
     # TODO: implement usage of pre-trained network
 
@@ -937,6 +938,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
         if t < low_start_timesteps:
             action = sample_action(act_dim) # a_t
+
         else:
             action = get_action(c_obs, subgoal, deterministic= not train_indicator) # a_t
             action = np.squeeze(action) # (1,8) -> (8,): stochastic action
@@ -952,8 +954,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # DO NOT Make done = True when it hits timeout
         ep_len += 1
         ep_ret += manager_reward # reward in terms of achieving episodic task
-        done, reset = False, True if ep_len== max_ep_len else done
-        
+        done = False if ep_len== max_ep_len else done
+        if done:
+            rospy.logwarn('=============== Now this epsiode is done! ====================')
 
         next_full_stt = np.concatenate(next_obs['observation']['full_state']) # s_t
         next_c_obs = next_obs['observation']['color_obs'] #o_t
@@ -965,8 +968,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             manager_temp_transition[-2] += manager_reward # sum(R_t:t+c)
             manager_temp_transition[0].append(next_full_stt) # append s_seq
             manager_temp_transition[1].append(next_c_obs) # append o_seq
-            manager_temp_transition[2].append(action)     # append a_seq
-        
+            manager_temp_transition[2].append(action)     # append a_seq        
             # compute intrinsic reward
             intrinsic_reward = env.compute_intrinsic_reward(full_stt, next_full_stt, subgoal)
 
@@ -1031,4 +1033,4 @@ if __name__ == '__main__':
     from utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
     
-    ecsac(train_indicator=0, logger_kwargs=logger_kwargs) # 1 Train / 0 Test (@real)
+    ecsac(train_indicator=1, logger_kwargs=logger_kwargs) # 1 Train / 0 Test (@real)
