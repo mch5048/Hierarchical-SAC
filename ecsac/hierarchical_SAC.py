@@ -28,10 +28,10 @@ from state_action_space import *
 
 from wandb.tensorflow import wandb
 
-wandb.init(project="hierarchical-sac")
+wandb.init(project="hierarchical-sac", tensorboard=True)
 
-path = '/home/irobot/catkin_ws/src/ddpg/scripts/'
-log_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp'
+rms_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/'
+log_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/'
 # manager weight save dirs
 MAN_PI_MODEL_SAVEDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/man_pi_trained/'
 MAN_QF1_MODEL_SAVEDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/man_qf1_trained/'
@@ -298,6 +298,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     wandb.config.pi_lr = pi_lr 
     wandb.config.vf_lr = vf_lr 
     wandb.config.alp_lr = alp_lr 
+    # model save/load
+    DATA_LOAD_STEP = 20000
 
     IS_TRAIN = train_indicator
     USE_CARTESIAN = True
@@ -370,7 +372,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     with tf.variable_scope('manager'):
         with tf.variable_scope('main'):                                                     
             mu_hi, q1_hi, q2_hi, q1_pi_hi, pi_reg_hi = manager_actor_critic(stt_ph, dg_ph, sg_ph, aux_ph, action_space=None)
-        
         # target_policy network
         with tf.variable_scope('target'):
             mu_hi_targ, _, _, _, _ = manager_actor_critic(stt1_ph, dg1_ph, sg_ph, aux_ph, action_space=None)
@@ -435,7 +436,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         v_loss_lo = 0.5 * tf.reduce_mean((v_backup_lo - v_lo)**2)
         value_loss_lo = q1_loss_lo + q2_loss_lo + v_loss_lo # coeffs?
         l2_loss_lo = tf.losses.get_regularization_loss()
-        value_loss_lo += l2_loss_lo
+        # value_loss_lo += l2_loss_lo
         alpha_loss_lo = tf.reduce_mean(-log_alpha_lo*tf.stop_gradient(logp_pi_lo+target_ent)) # why tf.stop_gradient here?
         # all losses make sense to me!
     rospy.loginfo("loss ops have been defined")
@@ -448,7 +449,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         pi_optimizer = MpiAdamOptimizer(learning_rate=pi_lr)
         q_optimizer = MpiAdamOptimizer(learning_rate=vf_lr)
         rospy.loginfo("manager optimizers have been created")
-        gv = get_vars('manager/main/pi')
         grads_and_vars_pi_hi = pi_optimizer.compute_gradients(pi_loss_hi, var_list=get_vars('manager/main/pi'))
         grads_and_vars_q_hi = q_optimizer.compute_gradients(q_loss_hi, var_list=get_vars('manager/main/q'))
 
@@ -473,7 +473,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 v_s.append(tf.summary.histogram(vvar.op.name + '/gradients', vgrad, family='value_summary'))
                 v_s.append(tf.summary.histogram(vvar.op.name + '/gradients/norm', l2_norm(vgrad), family='value_summary'))
         v_hi_summary_op = tf.summary.merge(v_s)
-        pi_s.append(tf.summary.scalar('critic_loss', q_loss_hi,family='value_summary'))
+        v_s.append(tf.summary.scalar('critic_loss', q_loss_hi,family='value_summary'))
         rospy.loginfo("logging for manager has been set")
 
         # Polyak averaging for target variables
@@ -513,7 +513,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         pi_s = []
         for pigrad, pivar in grads_and_vars_pi_lo:
             pi_s.append(tf.summary.histogram(pivar.op.name + '', pivar, family='policy_summary'))
-            if pigrad is not None and  'log_std' not in pivar.name:
+            if pigrad is not None and 'log_std' not in pivar.name:
                 pi_s.append(tf.summary.histogram(pivar.op.name + '/gradients', pigrad, family='policy_summary'))
                 pi_s.append(tf.summary.histogram(pivar.op.name + '/gradients/norm', l2_norm(pigrad), family='policy_summary'))
         pi_s.append(tf.summary.scalar('actor_loss', pi_loss_lo,family='policy_summary'))
@@ -525,8 +525,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             if vgrad is not None:
                 v_s.append(tf.summary.histogram(vvar.op.name + '/gradients', vgrad, family='value_summary'))
                 v_s.append(tf.summary.histogram(vvar.op.name + '/gradients/norm', l2_norm(vgrad), family='value_summary'))
+        v_s.append(tf.summary.scalar('critic_loss', v_loss_lo,family='value_summary'))
         v_lo_summary_op = tf.summary.merge(v_s)
-        pi_s.append(tf.summary.scalar('critic_loss', v_loss_lo,family='value_summary'))
         rospy.loginfo("logging for controller has been set")
 
         # All ops to call during one training step
@@ -553,7 +553,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
 
     sess = tf.Session(config=config)
-
     saver = tf.train.Saver()
 
     rospy.loginfo("initializing global variables...")
@@ -561,7 +560,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     sess.run(tf.global_variables_initializer())
     sess.run(target_init_ops)
 
-    summary_writer = tf.summary.FileWriter(path + 'sac_exp/summary/', sess.graph)
+    summary_writer = tf.summary.FileWriter(log_path + 'summary/', sess.graph)
                     #   color obs      pos    vel   eff   grip.   e.e.  obj(aux)   
     # obs_shape_list = [(1,100,100,3), (1,7), (1,7), (1,7), (1,1), (1,7), (1,3)]
     obs_shape_list = [(100,100,3), (7), (7), (7), (1), (7), (3)]
@@ -573,10 +572,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # summary_manager.setup_train_summary()
     # summary_manager.setup_sac_summary() # logs ppo specific values
     # should make it more specific to HIRO architecture
-
-    # Setup model saving
-    # logger.setup_tf_saver(sess, inputs={'obs': x_ph, 'a': a_ph}, 
-    #                             outputs={'mu': mu, 'pi': pi, 'q1': q1, 'q2': q2, 'v': v})
 
     def normalize_action(action, space, batch_size=1):
         """ relocate and rescale the aciton of controller policy (subgoal) to desirable values.    
@@ -629,10 +624,12 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             norm_action = np.clip(action, low, high)
         return norm_action
 
+
     def reloc_rescale_gripper(gripper):
         """ relocate & rescale action to the desirable gripper 
         """
         return 0.02*gripper + 0.022
+
 
     def get_action(obs, sub_goal, deterministic=False): # True for test
         """ infer primitive action from low-level policy
@@ -640,22 +637,23 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             7 joint velocities 
         """
         act_op = mu_lo if deterministic else pi_lo # returned from actor_critic function
-        # sub_goal, obs = normalize_observation(full_stt=subgoal.reshape((-1,)+subgoal.shape), c_obs=obs.reshape((-1,)+obs.shape))
         sub_goal, obs = normalize_observation(full_stt=sub_goal.reshape((-1,sub_goal_dim)), c_obs=obs.reshape((-1,)+obs_dim))
         # TODO: resolve shape mismatching issue
         return sess.run(act_op, feed_dict={obs_ph: obs,
                                            sg_ph: sub_goal})
+
+
     def get_subgoal(state, des_goal):
         """ infer subgoal from high-level policy for every freq.
         The output of the higher-level actor net is scaled to an approximated range of high-level acitons.
         7 joint torques : , 7 joint velocities: , 7 joint_positions: , 3-ee positions: , 4-ee quaternions: , 1 gripper_position:
         """
-        # state = normalize_observation(full_stt=state.reshape((-1,)+state.shape))
-        # des_goal = normalize_observation(full_stt=des_goal.reshape((-1,)+des_goal.shape))
         state = normalize_observation(full_stt=state.reshape((-1, stt_dim)))
         des_goal = normalize_observation(full_stt=des_goal.reshape((-1,des_goal_dim)))
         return sess.run(mu_hi, feed_dict={stt_ph: state,    
                                           dg_ph: des_goal})
+
+
     def train_low_level_controller(train_ops, buffer, ep_len=max_ep_len, batch_size=batch_size, discount=gamma, polyak=polyak, step=0):
         """ train low-level actor-critic for each episode's timesteps
         TODO: determine what arguments to be parsed for this function.
@@ -690,11 +688,16 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                          rew_ph_lo: (batch['rews']),
                          dn_ph: batch['done'],
                         }
-            low_outs = sess.run(controller_ops, ctrl_feed_dict)
+            # low_outs = sess.run(controller_ops + monitor_lo_ops, ctrl_feed_dict)
+            low_outs = sess.run(controller_ops + monitor_lo_ops, ctrl_feed_dict)
             # logging
             wandb.log({'policy_loss_lo': low_outs[0], 'q1_loss_lo': low_outs[1],
                         'q2_loss_lo': low_outs[2], 'v_loss_lo': low_outs[3],
                         'q1_lo': low_outs[4], 'q2_lo': low_outs[5], 'v_lo': low_outs[6], 'step': step})
+        rospy.loginfo('writes summary of low-level policy')
+        summary_writer.add_summary(low_outs[-2], step) # policy monitor
+        rospy.loginfo('writes summary of low-level value-ftn')
+        summary_writer.add_summary(low_outs[-1], step) # value monitor
 
     def off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=100, discount=gamma, polyak=polyak):
         """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
@@ -753,7 +756,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
         batched_candidates= batched_candidates.transpose(1,0,2)
 
-
         pi_lo_actions = np.zeros((ncands, flat_batch_size) + action_dim) # shape (10, flat_batch_size, 8)
 
         # for which goal the new low policy would have taken the same action as the old one?
@@ -810,14 +812,23 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                          dn_ph: batch['done'],
                         }
         q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
+        q_ops.append(v_hi_summary_op)
         pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
+        pi_ops.append(pi_hi_summary_op)
         q_hi_outs = sess.run(q_ops, man_feed_dict)
+
         if step % delayed_update_freq ==0: # delayed update of the policy and target nets.
             pi_hi_outs = sess.run(pi_ops, man_feed_dict)
             wandb.log({'policy_loss_hi': pi_hi_outs[0]})
+            rospy.loginfo('writes summary of high-level policy')
+            summary_writer.add_summary(pi_hi_outs[-1], step) # value monitor
+
         # logging
         wandb.log({'q1_hi': q_hi_outs[0], 'q2_hi': q_hi_outs[1], 'q1_loss_hi': q_hi_outs[2],
                      'q2_loss_hi': q_hi_outs[3], 'q_hi': q_hi_outs[4], 'step': step})
+        rospy.loginfo('writes summary of high-level value-ftn')
+        summary_writer.add_summary(q_hi_outs[-1], step) # policy monitor
+
 
     def normalize_observation(full_stt=None, c_obs=None, aux=None, act=None):
         """ normalizes observations for each step based on running mean-std.
@@ -849,6 +860,41 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             full_stt[:,22:] = normalize(full_stt[:,22:], summary_manager.s_t5_rms) # ee pose
             return full_stt, c_obs
 
+    def update_rms(full_stt=None, c_obs=None, aux=None, act=None):
+        """Update the mean/stddev of the running mean-std normalizers.
+        Normalize full-state, color_obs, and auxiliary observation.
+        Caution on the shape!
+        """
+        summary_manager.s_t0_rms.update(c_obs) # c_obs
+        summary_manager.s_t1_rms.update(full_stt[:7]) # joint_pos
+        summary_manager.s_t2_rms.update(full_stt[7:14]) # joint_vel
+        summary_manager.s_t3_rms.update(full_stt[14:21]) # joint_eff
+        summary_manager.s_t4_rms.update(full_stt[21:22]) # gripper_position
+        summary_manager.s_t5_rms.update(full_stt[22:]) # ee_pose
+        summary_manager.s_t6_rms.update(aux) # aux
+        summary_manager.a_t_rms.update(act) # ee_pose
+
+    def load_rms():
+        rospy.logwarn('Loads the mean and stddev for test time')
+        summary_manager.s_t0_rms.load_mean_std(rms_path+'mean_std0.bin')
+        summary_manager.s_t1_rms.load_mean_std(rms_path+'mean_std1.bin')
+        summary_manager.s_t2_rms.load_mean_std(rms_path+'mean_std2.bin')
+        summary_manager.s_t3_rms.load_mean_std(rms_path+'mean_std3.bin')
+        summary_manager.s_t4_rms.load_mean_std(rms_path+'mean_std4.bin')
+        summary_manager.s_t5_rms.load_mean_std(rms_path+'mean_std5.bin')
+        summary_manager.s_t6_rms.load_mean_std(rms_path+'mean_std6.bin')
+        summary_manager.a_t_rms.load_mean_std(rms_path+'mean_std7.bin')
+    
+    def save_rms(step):
+        rospy.logwarn('Saves the mean and stddev @ step %d', step)
+        summary_manager.s_t0_rms.save_mean_std(rms_path+'mean_std0.bin')
+        summary_manager.s_t1_rms.save_mean_std(rms_path+'mean_std1.bin')
+        summary_manager.s_t2_rms.save_mean_std(rms_path+'mean_std2.bin')
+        summary_manager.s_t3_rms.save_mean_std(rms_path+'mean_std3.bin')
+        summary_manager.s_t4_rms.save_mean_std(rms_path+'mean_std4.bin')
+        summary_manager.s_t5_rms.save_mean_std(rms_path+'mean_std5.bin')
+        summary_manager.s_t6_rms.save_mean_std(rms_path+'mean_std6.bin')
+        summary_manager.a_t_rms.save_mean_std(rms_path+'mean_std7.bin')
 
     DEMO_USE = False # DAgger should be reimplemented 
     # os.chdir(DEMO_DIR)
@@ -878,8 +924,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
     else: # test
         rospy.logwarn('Now loads the pretrained weight for test')
-        new_saver = tf.train.import_meta_graph(os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-5000.meta')
-        new_saver.restore(sess, os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-5000')
+        load_rms()    
+        new_saver = tf.train.import_meta_graph(os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
+        new_saver.restore(sess, os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}'.format(DATA_LOAD_STEP))
     # Main loop: collect experience in env and update/log each epoch
     while not rospy.is_shutdown() and t <int(total_steps):
         if done or ep_len== max_ep_len: # if an episode is finished (no matter done==True)
@@ -909,7 +956,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                         manager_temp_transition[2].append(action) # a_seq
                 # buffer store arguments : s_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done 
                 manager_buffer.store(*manager_temp_transition) # off policy correction is done inside the manager_buffer 
-                      
+                save_rms(step=t)
             # reset the environment since an episode has been finished
             obs = env.reset() #'observation', 'desired_goal', g_des -> task specific goal!
             done = False
@@ -938,7 +985,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
         if t < low_start_timesteps:
             action = sample_action(act_dim) # a_t
-
         else:
             action = get_action(c_obs, subgoal, deterministic= not train_indicator) # a_t
             action = np.squeeze(action) # (1,8) -> (8,): stochastic action
@@ -956,8 +1002,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         ep_ret += manager_reward # reward in terms of achieving episodic task
         done = False if ep_len== max_ep_len else done
         if done:
-            rospy.logwarn('=============== Now this epsiode is done! ====================')
-
+            rospy.logwarn('=============== Now epsiode %d ends with done signal! ====================', episode_num)
         next_full_stt = np.concatenate(next_obs['observation']['full_state']) # s_t
         next_c_obs = next_obs['observation']['color_obs'] #o_t
         next_aux = obs['auxiliary'] # g_des
@@ -971,7 +1016,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             manager_temp_transition[2].append(action)     # append a_seq        
             # compute intrinsic reward
             intrinsic_reward = env.compute_intrinsic_reward(full_stt, next_full_stt, subgoal)
-
         # subgoal transition
         next_subgoal = env.env_goal_transition(full_stt, next_full_stt, subgoal)
         # add transition for low-level policy
@@ -979,7 +1023,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         if train_indicator:
             controller_buffer.store(c_obs, next_c_obs, subgoal, 
             next_subgoal, full_stt, next_full_stt, action, aux, next_aux, intrinsic_reward, done)
-
         # update observations and subgoal
         obs = next_obs
         subgoal = next_subgoal
@@ -1011,6 +1054,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 # Create a high level transition : note that the action of manager policy is subgoal
                 # buffer store arguments :    s_seq,    o_seq, a_seq, obs,  obs_1,     dg,    dg_1,      stt, stt_1, act,  aux, aux_1,  rew, done 
                 manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
+                # update running mean-std normalizer
+                # update_rms(full_stt=full_stt, c_obs=c_obs, aux=aux, act=action)
 
             if t % save_freq == 0 and train_indicator:
                 rospy.loginfo('##### saves network weights ##### for step %d', t)
