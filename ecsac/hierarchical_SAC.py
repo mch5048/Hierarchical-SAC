@@ -479,7 +479,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # Polyak averaging for target variables
         target_update_hi = tf.group([tf.assign(v_targ, polyak*v_targ + (1-polyak)*v_main)
                                 for v_main, v_targ in zip(get_vars('manager/main'), get_vars('manager/target'))])
-        step_hi_q_ops = [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, 
+        step_hi_q_ops = [tf.reduce_mean(q1_hi), tf.reduce_mean(q2_hi), q1_loss_hi, q2_loss_hi, q_loss_hi, 
                         train_q_hi_op]
         step_hi_pi_ops = [pi_loss_hi, train_pi_hi_op, target_update_hi]
         step_hi_ops = {'q_ops': step_hi_q_ops, 'pi_ops':step_hi_pi_ops}
@@ -530,7 +530,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         rospy.loginfo("logging for controller has been set")
 
         # All ops to call during one training step
-        step_lo_ops = [pi_loss_lo, q1_loss_lo, q2_loss_lo, v_loss_lo, q1_lo, q2_lo, v_lo, logp_pi_lo, 
+        step_lo_ops = [pi_loss_lo, q1_loss_lo, q2_loss_lo, v_loss_lo, tf.reduce_mean(q1_lo), tf.reduce_mean(q2_lo), tf.reduce_mean(v_lo), logp_pi_lo, 
         train_pi_lo_op, train_value_lo_op, target_update_lo]
         # step_lo_ops = [q_backup_lo, q1_lo, q1_pi_lo, pi_loss_lo, q1_loss_lo, q2_loss_lo, v_loss_lo, q1_lo, q2_lo, v_lo, logp_pi_lo, 
         #             train_pi_lo_op, train_value_lo_op, target_update_lo]
@@ -811,6 +811,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                          rew_ph_hi: batch['rews'],
                          dn_ph: batch['done'],
                         }
+                       
         q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
         q_ops.append(v_hi_summary_op)
         pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
@@ -825,7 +826,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
         # logging
         wandb.log({'q1_hi': q_hi_outs[0], 'q2_hi': q_hi_outs[1], 'q1_loss_hi': q_hi_outs[2],
-                     'q2_loss_hi': q_hi_outs[3], 'q_hi': q_hi_outs[4], 'step': step})
+                     'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'step': step})
         rospy.loginfo('writes summary of high-level value-ftn')
         summary_writer.add_summary(q_hi_outs[-1], step) # policy monitor
 

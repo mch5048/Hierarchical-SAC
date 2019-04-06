@@ -8,6 +8,7 @@ EPS = 1e-8
 CRIT_L2_REG = 1e-3
 init_scale=np.sqrt(2)
 xavier = tf.contrib.layers.xavier_initializer()
+ortho = tf.keras.initializers.Orthogonal(init_scale, seed=0)
 
 def ortho_init(scale=1.0):
     """
@@ -73,12 +74,12 @@ def placeholders(*args):
 #     return input_tensor
 
 
-def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None, kernel_regularizer=None, kernel_initializer=ortho_init(init_scale)):
+def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None, kernel_regularizer=None, kernel_initializer=ortho):
     for h in hidden_sizes[:-1]:
         x = (tf.layers.dense(x, units=h, activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer))
     return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer)
 
-def cnn_feature_extractor(x, activation=tf.nn.relu, kernel_regularizer=None, kernel_initializer=ortho_init(init_scale)):
+def cnn_feature_extractor(x, activation=tf.nn.relu, kernel_regularizer=None, kernel_initializer=ortho):
     x = tf.layers.conv2d(x, filters=32,kernel_size=8, strides=(4,4), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv1')
     x = tf.layers.conv2d(x, filters=64,kernel_size=4, strides=(2,2), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv2')
     x = tf.layers.conv2d(x, filters=64,kernel_size=3, strides=(1,1), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv3')
@@ -246,7 +247,7 @@ def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space=None, hidden
     # policy
     with tf.variable_scope('pi'): # '/manager/main/pi/'
         mu, _pre_act, batch_size = policy(stt, goal, sub_goal, aux, activation=activation, hidden_sizes=hidden_sizes,
-                                          output_activation=output_activation, kernel_initializer=xavier)
+                                          output_activation=output_activation, kernel_initializer=ortho)
 
     # policy reg losses
     preact_reg = tf.norm(_pre_act) 
@@ -278,7 +279,7 @@ def cnn_controller_actor_critic(stt, obs, goal, act, aux, action_space=None, hid
     kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=CRIT_L2_REG)
     # policy
     with tf.variable_scope('pi'):
-        _mu, _pi, _logp_pi, std, pi_g, logp_pi_g = policy(obs, act, goal, activation, output_activation, kernel_initializer=xavier)
+        _mu, _pi, _logp_pi, std, pi_g, logp_pi_g = policy(obs, act, goal, activation, output_activation, kernel_initializer=ortho)
         _mu, _pi, logp_pi = apply_squashing_func(_mu, _pi, _logp_pi)
         mu = tf.concat([_mu, pi_g], axis=-1)
         pi = tf.concat([_pi, pi_g], axis=-1)
