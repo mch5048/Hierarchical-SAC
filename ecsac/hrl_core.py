@@ -253,14 +253,8 @@ def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space=None, hidden
     preact_reg = tf.norm(_pre_act) 
 
     # make sure actions are in correct range
-    rospy.logwarn('DEBUG FOR THE SHAPE OF HIGH LEVEL ACTOR : BEFORE')
-    print (mu)
     mu = mu * s_scale + s_mean
-    rospy.logwarn('DEBUG FOR THE SHAPE OF HIGH LEVEL ACTOR : MID')
-    print (mu)
     mu = tf.minimum(s_high, tf.maximum(s_low, mu))
-    rospy.logwarn('DEBUG FOR THE SHAPE OF HIGH LEVEL ACTOR : AFTERS')
-    print (mu)
 
     # vfs for TD3
     vf_mlp = lambda x : tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None, kernel_regularizer=kernel_regularizer), axis=1)

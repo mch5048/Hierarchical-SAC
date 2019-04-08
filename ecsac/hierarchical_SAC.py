@@ -358,24 +358,28 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         sub_goal_dim += grip_dim
    
     # Inputs to computation graph -> placeholders for next goal state is necessary.
-    obs_ph = tf.placeholder(dtype=tf.float32, shape=(None,)+obs_dim) # o_t : low_level controller
-    obs1_ph = tf.placeholder(dtype=tf.float32, shape=(None,)+obs_dim) # o_t+1 : low_level controller
-    sg_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # g_t_tilde : low_level controller
-    sg1_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # g_t+1_tilde : low_level controller
-    stt_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # s_t : low_level critic, high_level actor-critic
-    stt1_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # s_t+1 : low_level critic, high_level actor-critic
-    dg_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # dg_t : high_level_actor-critic -> task goal
-    dg1_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # dg_t+1 : high_level_actor-critic -> task goal
-    act_ph = tf.placeholder(dtype=tf.float32, shape=(None, act_dim)) # a_t : for low_level a-c
-    aux_ph = tf.placeholder(dtype=tf.float32, shape=(None, aux_dim)) # only fed into the critic
-    aux1_ph = tf.placeholder(dtype=tf.float32, shape=(None, aux_dim)) # only fed into the critic
-    rew_ph_lo = tf.placeholder(dtype=tf.float32, shape=(None)) # r_t(s,g,a,s') = -1*l2_norm(s+g-s') : given by high-level policy
-    rew_ph_hi = tf.placeholder(dtype=tf.float32, shape=(None)) # R_t = sparse (1 if suc else 0): given by the env.
-    dn_ph = tf.placeholder(dtype=tf.float32, shape=(None)) # if episode is done : given by env.
+    with tf.name_scope('placeholders'):
+        obs_ph = tf.placeholder(dtype=tf.float32, shape=(None,)+obs_dim) # o_t : low_level controller
+        obs1_ph = tf.placeholder(dtype=tf.float32, shape=(None,)+obs_dim) # o_t+1 : low_level controller
+        sg_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # g_t_tilde : low_level controller
+        sg1_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # g_t+1_tilde : low_level controller
+        stt_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # s_t : low_level critic, high_level actor-critic
+        stt1_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # s_t+1 : low_level critic, high_level actor-critic
+        dg_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # dg_t : high_level_actor-critic -> task goal
+        dg1_ph = tf.placeholder(dtype=tf.float32, shape=(None, stt_dim)) # dg_t+1 : high_level_actor-critic -> task goal
+        act_ph = tf.placeholder(dtype=tf.float32, shape=(None, act_dim)) # a_t : for low_level a-c
+        aux_ph = tf.placeholder(dtype=tf.float32, shape=(None, aux_dim)) # only fed into the critic
+        aux1_ph = tf.placeholder(dtype=tf.float32, shape=(None, aux_dim)) # only fed into the critic
+        rew_ph_lo = tf.placeholder(dtype=tf.float32, shape=(None)) # r_t(s,g,a,s') = -1*l2_norm(s+g-s') : given by high-level policy
+        rew_ph_hi = tf.placeholder(dtype=tf.float32, shape=(None)) # R_t = sparse (1 if suc else 0): given by the env.
+        dn_ph = tf.placeholder(dtype=tf.float32, shape=(None)) # if episode is done : given by env.
     rospy.loginfo("placeholder have been created")
 
     # her_sampler = Her_sampler(reward_func=env.compute_reward_from_goal)
-
+    # Experience buffer for seperate controller and manager
+    controller_buffer = ReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=ctrl_replay_size)
+    manager_buffer = ManagerReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=man_replay_size, seq_len=manager_propose_freq)
+    
     # training ops definition
     # define operations for training high-level policy : TD3
     with tf.variable_scope('manager'):
@@ -396,135 +400,130 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             act_hi_targ = tf.minimum(s_high, tf.maximum(s_low, act_hi_targ)) # equivalent to periodic subgoals
             # target Q-values, using action from target policy
             _, q1_targ_hi, q2_targ_hi, _, _ = manager_actor_critic(stt1_ph, dg1_ph, act_hi_targ, aux_ph, action_space=None)
+        
+        # Losses for TD3
+        with tf.name_scope('pi_loss_hi'):
+            pi_loss_hi = -tf.reduce_mean(q1_pi_hi)
+            pi_loss_hi += pi_reg_hi*reg_param['lam_mean'] # regularization loss for the actor
+        with tf.name_scope('q_loss_hi'):
+            min_q_targ_hi = tf.minimum(q1_targ_hi, q2_targ_hi) # tensor
+            q_backup_hi = tf.stop_gradient(rew_ph_hi + gamma*(1-dn_ph)*min_q_targ_hi)
+            q1_loss_hi = tf.losses.mean_squared_error(labels=q_backup_hi, predictions=q1_hi, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
+            q2_loss_hi = tf.losses.mean_squared_error(labels=q_backup_hi, predictions=q2_hi, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
+            q_loss_hi = q1_loss_hi + q2_loss_hi
+            l2_loss_hi = tf.losses.get_regularization_loss()
+            q_loss_hi += l2_loss_hi
+
+        # define training ops
+        with tf.name_scope('optimize'):
+            pi_hi_optimizer = tf.train.AdamOptimizer(learning_rate=pi_lr, name='pi_hi_optimizer')
+            q_hi_optimizer = tf.train.AdamOptimizer(learning_rate=vf_lr, name='q_hi_optimizer')
+            rospy.loginfo("manager optimizers have been created")
+            
+            train_pi_hi_op = tf.contrib.layers.optimize_loss(
+                pi_loss_hi, global_step=None, learning_rate=pi_lr, optimizer=pi_hi_optimizer, variables=get_vars('manager/main/pi'),
+                increment_global_step=False, summaries=("gradients", "gradient_norm", "global_gradient_norm"), name='pi_hi_opt')
+
+            with tf.control_dependencies([train_pi_hi_op]): # expreimental application on high-level policy's learning in TD3.
+                train_q_hi_op = tf.contrib.layers.optimize_loss(
+                    q_loss_hi, global_step=None, learning_rate=pi_lr, optimizer=q_hi_optimizer, variables=get_vars('manager/main/q'),
+                    increment_global_step=False, summaries=("gradients", "gradient_norm", "global_gradient_norm"), name='q_hi_opt')
+
+            with tf.control_dependencies([train_q_hi_op]): # train_qfs 
+                with tf.name_scope('polyak_hi_update'):
+                    target_update_hi = tf.group([tf.assign(v_targ, polyak*v_targ + (1-polyak)*v_main)
+                                            for v_main, v_targ in zip(get_vars('manager/main'), get_vars('manager/target'))])
+        # create manager summaries
+        man_pi_summary = tf.summary.merge_all(scope='manager/optimize/pi_hi_opt', name='manager_pi_sumamry')
+        man_q_summary = tf.summary.merge_all(scope='manager/optimize/q_hi_opt', name='manager_q_sumamry')
+        rospy.loginfo("computational ops for manager are instantiated")
 
     # define operations for training low-level policy : SAC
     with tf.variable_scope('controller'):
         with tf.variable_scope('main'):
             mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, q2_pi_lo, v_lo, pi_g, reg_losses = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
+            log_alpha_lo = tf.get_variable(name='log_alpha', initializer=-1.0, dtype=np.float32)
+            alpha_lo = tf.exp(log_alpha_lo) 
 
         # Target value network
         with tf.variable_scope('target'):
             # _, _, _, _, _, _, _, v_targ_lo, _, _  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
             _, _, _, _, _, _, _, _, _, _  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
 
-    # Experience buffer for seperate controller and manager
-    controller_buffer = ReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=ctrl_replay_size)
-    manager_buffer = ManagerReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=man_replay_size, seq_len=manager_propose_freq)
-    
-    # high-level policy training based on TD3
+        with tf.name_scope('pi_loss_lo'):
+            pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
+            pi_loss_lo += reg_losses['preact_reg']*reg_param['lam_mean']  # regularization losses for the actor
+            pi_loss_lo += reg_losses['std_reg']*reg_param['lam_std']
 
-    # Bellman backup for Q functions, using clipped double-Q targets
-    # Min Q_targ: for manager -> TD3 learning
-    with tf.variable_scope('manager'):
-        min_q_targ_hi = tf.minimum(q1_targ_hi, q2_targ_hi) # tensor
-        backup_hi = tf.stop_gradient(rew_ph_hi + gamma*(1-dn_ph)*min_q_targ_hi)
-        # Losses for TD3
-        pi_loss_hi = -tf.reduce_mean(q1_pi_hi)
-        pi_loss_hi += pi_reg_hi*reg_param['lam_mean'] # regularization loss for the actor
-        q1_loss_hi = tf.reduce_mean((q1_hi-backup_hi)**2)
-        q2_loss_hi = tf.reduce_mean((q2_hi-backup_hi)**2)
-        q_loss_hi = q1_loss_hi + q2_loss_hi
-        l2_loss_hi = tf.losses.get_regularization_loss()
-        q_loss_hi += l2_loss_hi
-    # low-level policy training based on SAC
+        with tf.name_scope('q_loss_lo'):
+            min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
+            value_targ_lo = min_q_pi_lo + - alpha_lo * logp_pi_lo # implicit valfue ftn thru soft q-ftn
+            q_backup_lo = tf.stop_gradient(rew_ph_lo + gamma*(1-dn_ph)*value_targ_lo) 
+            q1_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q1_lo, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
+            q2_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q2_lo, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
+            q1_l2_loss_lo = tf.losses.get_regularization_loss()
+            q2_l2_loss_lo = tf.losses.get_regularization_loss()
+            q1_loss_lo += q1_l2_loss_lo
+            q2_loss_lo += q2_l2_loss_lo
+        with tf.name_scope('alpha_loss_lo'):
+            alpha_loss_lo = tf.reduce_mean(-log_alpha_lo*tf.stop_gradient(logp_pi_lo+target_ent)) # why tf.stop_gradient here?
 
-    with tf.variable_scope('controller'):
-        # Min Double-Q:
-        min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
-        # Targets for Q and V regression
-        log_alpha_lo = tf.get_variable(name='log_alpha', initializer=-1.0, dtype=np.float32)
-        alpha_lo = tf.exp(log_alpha_lo) 
+        with tf.name_scope('optimize'):
+            pi_lo_optimizer = tf.train.AdamOptimizer(learning_rate=pi_lr, name='pi_lo_optimizer')
+            q1_lo_optimizer = tf.train.AdamOptimizer(learning_rate=vf_lr, name='q1_lo_optimizer')
+            q2_lo_optimizer = tf.train.AdamOptimizer(learning_rate=vf_lr, name='q2_lo_optimizer')
+            alpha_lo_optimizer = tf.train.AdamOptimizer(learning_rate=alp_lr, name='alpha_lo_optimizer')
+        
+            # (control dep of train_pi_op because sess.run otherwise evaluates in nondeterministic order)
+            rospy.loginfo("controller optimizers have been created")
+            # explicitly compute gradients for debugging
+            # learnable temperature
+            train_alpha_lo_op = alpha_lo_optimizer.minimize(alpha_loss_lo,var_list=[log_alpha_lo])
+            train_pi_lo_op = tf.contrib.layers.optimize_loss(
+                pi_loss_lo, global_step=None, learning_rate=pi_lr, optimizer=pi_lo_optimizer, variables=get_vars('controller/main/pi'),
+                increment_global_step=False, summaries=("gradients", "gradient_norm", "global_gradient_norm"), name='pi_lo_opt')
 
-        # new
-        value_targ_lo = min_q_pi_lo + - alpha_lo * logp_pi_lo # implicit valfue ftn thru soft q-ftn
-        q_backup_lo = tf.stop_gradient(rew_ph_lo + gamma*(1-dn_ph)*value_targ_lo) 
+            with tf.control_dependencies([train_pi_lo_op]): # training pi won't affect learning vf
+                train_q1_lo_op = tf.contrib.layers.optimize_loss(
+                q1_loss_lo, global_step=None, learning_rate=vf_lr, optimizer=q1_lo_optimizer, variables=get_vars('controller/main/q1'),
+                increment_global_step=False, summaries=("gradients", "gradient_norm"), name='q1_lo_opt')
+                train_q2_lo_op = tf.contrib.layers.optimize_loss(
+                q2_loss_lo, global_step=None, learning_rate=vf_lr, optimizer=q2_lo_optimizer, variables=get_vars('controller/main/q2'),
+                increment_global_step=False, summaries=("gradients", "gradient_norm"), name='q2_lo_opt')
+                train_q_lo_op = tf.group(train_q1_lo_op, train_q2_lo_op)
+            # Polyak averaging for target variables
+            # (control flow because sess.run otherwise evaluates in nondeterministic order)
+            with tf.control_dependencies([train_q_lo_op]): # train_qfs 
+                target_update_lo = tf.group([tf.assign(v_targ, polyak*v_targ + (1-polyak)*v_main)
+                                        for v_main, v_targ in zip(get_vars('controller/main'), get_vars('controller/target'))])
 
-        # Soft actor-critic losses
-        # pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
-        pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
-        pi_loss_lo += reg_losses['preact_reg']*reg_param['lam_mean']  # regularization losses for the actor
-        pi_loss_lo += reg_losses['std_reg']*reg_param['lam_std']
-        # q1_loss_lo = 0.5 * tf.reduce_mean((q_backup_lo - q1_lo)**2)
-        # q2_loss_lo = 0.5 * tf.reduce_mean((q_backup_lo - q2_lo)**2)
-        # new
-        q1_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q1_lo, weights=0.5)
-        q2_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q2_lo, weights=0.5)
-        q1_l2_loss_lo = tf.losses.get_regularization_loss()
-        q2_l2_loss_lo = tf.losses.get_regularization_loss()
-        q1_loss_lo += q1_l2_loss_lo
-        q2_loss_lo += q2_l2_loss_lo
-        alpha_loss_lo = tf.reduce_mean(-log_alpha_lo*tf.stop_gradient(logp_pi_lo+target_ent)) # why tf.stop_gradient here?
-        # all losses make sense to me!
-    
-    # Policy train op
-    # (has to be separate from value train op, because q1_pi appears in pi_loss)
-    with tf.variable_scope('manager'): # TD3 training ops
-    # Separate train ops for pi, q
-        pi_hi_optimizer = tf.train.AdamOptimizer(learning_rate=pi_lr, name='pi_hi_optimizer')
-        q_hi_optimizer = tf.train.AdamOptimizer(learning_rate=vf_lr, name='q_hi_optimizer')
-        rospy.loginfo("manager optimizers have been created")
-        train_pi_hi_op = tf.contrib.layers.optimize_loss(
-            pi_loss_hi, global_step=None, learning_rate=pi_lr, optimizer=pi_hi_optimizer, variables=get_vars('manager/main/pi'),
-            increment_global_step=False, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"))
+        # create controller summaries
+        ctrl_pi_summary = tf.summary.merge_all(scope='controller/optimize/pi_lo_opt')
+        ctrl_q1_summary = tf.summary.merge_all(scope='controller/optimize/q1_lo_opt')
+        ctrl_q2_summary = tf.summary.merge_all(scope='controller/optimize/q2_lo_opt')
+        rospy.loginfo("computational ops for controller are instantiated")
 
-    with tf.control_dependencies([train_pi_hi_op]): # expreimental application on high-level policy's learning in TD3.
-        train_q_hi_op = tf.contrib.layers.optimize_loss(
-            q_loss_hi, global_step=None, learning_rate=pi_lr, optimizer=q_hi_optimizer, variables=get_vars('manager/main/q'),
-            increment_global_step=False, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"))
 
-    with tf.control_dependencies([train_q_hi_op]): # train_qfs 
-        target_update_hi = tf.group([tf.assign(v_targ, polyak*v_targ + (1-polyak)*v_main)
-                                for v_main, v_targ in zip(get_vars('manager/main'), get_vars('manager/target'))])
-        # Polyak averaging for target variables
+    # merge ops for manager
+    with tf.name_scope('wandb_log'):
         step_hi_q_ops = [tf.reduce_mean(q1_hi), tf.reduce_mean(q2_hi), q1_loss_hi, q2_loss_hi, q_loss_hi, 
                         train_q_hi_op]
         step_hi_pi_ops = [pi_loss_hi, train_pi_hi_op, target_update_hi]
         step_hi_ops = {'q_ops': step_hi_q_ops, 'pi_ops':step_hi_pi_ops}
-        # step_hi_ops += monitor_hi_ops
-        rospy.loginfo("conputational ops for manager are instantiated")
-
-    with tf.variable_scope('controller'): # SAC training ops
-        pi_lo_optimizer = tf.train.AdamOptimizer(learning_rate=pi_lr, name='pi_lo_optimizer')
-        q1_lo_optimizer = tf.train.AdamOptimizer(learning_rate=vf_lr, name='q1_lo_optimizer')
-        q2_lo_optimizer = tf.train.AdamOptimizer(learning_rate=vf_lr, name='q2_lo_optimizer')
-        alpha_lo_optimizer = tf.train.AdamOptimizer(learning_rate=alp_lr, name='alpha_lo_optimizer')
     
-        # (control dep of train_pi_op because sess.run otherwise evaluates in nondeterministic order)
-        rospy.loginfo("controller optimizers have been created")
-        # explicitly compute gradients for debugging
-        # learnable temperature
-        train_alpha_lo_op = alpha_lo_optimizer.minimize(alpha_loss_lo,var_list=[log_alpha_lo])
-        train_pi_lo_op = tf.contrib.layers.optimize_loss(
-            pi_loss_lo, global_step=None, learning_rate=pi_lr, optimizer=pi_lo_optimizer, variables=get_vars('controller/main/pi'),
-            increment_global_step=False, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"))
-
-        with tf.control_dependencies([train_pi_lo_op]): # training pi won't affect learning vf
-            train_q1_lo_op = tf.contrib.layers.optimize_loss(
-            q1_loss_lo, global_step=None, learning_rate=vf_lr, optimizer=q1_lo_optimizer, variables=get_vars('controller/main/q1'),
-            increment_global_step=False, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"))
-            train_q2_lo_op = tf.contrib.layers.optimize_loss(
-            q2_loss_lo, global_step=None, learning_rate=vf_lr, optimizer=q2_lo_optimizer, variables=get_vars('controller/main/q2'),
-            increment_global_step=False, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"))
-            train_q_lo_op = tf.group(train_q1_lo_op, train_q2_lo_op)
-        # Polyak averaging for target variables
-        # (control flow because sess.run otherwise evaluates in nondeterministic order)
-        with tf.control_dependencies([train_q_lo_op]): # train_qfs 
-            target_update_lo = tf.group([tf.assign(v_targ, polyak*v_targ + (1-polyak)*v_main)
-                                    for v_main, v_targ in zip(get_vars('controller/main'), get_vars('controller/target'))])
-
-        # All ops to call during one training step
+        # merge ops for controller
         step_lo_ops = [pi_loss_lo, q1_loss_lo, q2_loss_lo, tf.reduce_mean(q1_lo), tf.reduce_mean(q2_lo), logp_pi_lo, 
         train_pi_lo_op, train_q_lo_op, target_update_lo]
         alpha_lo_op = [train_alpha_lo_op, alpha_lo] # monitor alpha_lo
         step_lo_ops +=alpha_lo_op
-        rospy.loginfo("conputational ops for controller are instantiated")
 
     # Initializing targets to match main variables
-    target_init_hi = tf.group([tf.assign(v_targ, v_main)
-                            for v_main, v_targ in zip(get_vars('manager/main'), get_vars('manager/target'))])
-    target_init_lo = tf.group([tf.assign(v_targ, v_main)
-                            for v_main, v_targ in zip(get_vars('controller/main'), get_vars('controller/target'))])
-    target_init_ops = [target_init_hi, target_init_lo]
+    with tf.name_scope('init_networks'):
+        target_init_hi = tf.group([tf.assign(v_targ, v_main)
+                                for v_main, v_targ in zip(get_vars('manager/main'), get_vars('manager/target'))])
+        target_init_lo = tf.group([tf.assign(v_targ, v_main)
+                                for v_main, v_targ in zip(get_vars('controller/main'), get_vars('controller/target'))])
+        target_init_ops = [target_init_hi, target_init_lo]
 
     config = tf.ConfigProto()
     # config.gpu_options.allow_growth = True
@@ -665,11 +664,17 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                          dn_ph: batch['done'],
                         }
             # low_outs = sess.run(controller_ops + monitor_lo_ops, ctrl_feed_dict)
-            low_outs = sess.run(controller_ops, ctrl_feed_dict)
+            low_outs = sess.run(controller_ops +[ctrl_pi_summary, ctrl_q1_summary, ctrl_q2_summary], ctrl_feed_dict)
             # logging
-            wandb.log({'policy_loss_lo': low_outs[0], 'q1_loss_lo': low_outs[1],
-                        'q2_loss_lo': low_outs[2], 'q1_lo': low_outs[3], 
-                        'q2_lo': low_outs[4], 'alpha': low_outs[10], 'step': step})
+            if itr % 10 == 0:
+                wandb.log({'policy_loss_lo': low_outs[0], 'q1_loss_lo': low_outs[1],
+
+                            'q2_loss_lo': low_outs[2], 'q1_lo': low_outs[3], 
+                            'q2_lo': low_outs[4], 'alpha': low_outs[10], 'global_step': step})
+
+        summary_writer.add_summary(low_outs[-3], step) # low-pi summary
+        summary_writer.add_summary(low_outs[-2], step) # low-q1 summary
+        summary_writer.add_summary(low_outs[-1], step) # low-q2 summary
 
     def off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=100, discount=gamma, polyak=polyak):
         """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
@@ -766,38 +771,38 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         rospy.logwarn("Now trains the high-level controller for %d timesteps", ep_len)
         _man_buffer = buffer
         # execute off-policy correction before training
-        batch = _man_buffer.sample_batch(batch_size)
-        # subgoal here is the action of manager network, action for computing log-likelihood
-        corr_subgoals = off_policy_correction(subgoals= batch['acts'],s_seq= batch['st_seq'],
-        # shape of corr_subgoals (batch_size, goal_dim)
-        o_seq= batch['ot_seq'], a_seq= batch['at_seq'])
-        q_ops = train_ops['q_ops'] # {'q_ops': step_hi_q_ops, 'pi_ops':step_hi_pi_ops}
-        # action of the manager is subgoal...
-        man_feed_dict = {stt_ph: normalize_observation(full_stt=batch['st']),
-                         stt1_ph: normalize_observation(full_stt=batch['st1']),
-                         sg_ph: normalize_observation(full_stt=batch['acts']),
-                         dg_ph : normalize_observation(full_stt=batch['g']),
-                         dg1_ph : normalize_observation(full_stt=batch['g1']),
-                         aux_ph : normalize_observation(aux=batch['aux']),
-                         aux1_ph : normalize_observation(aux=batch['aux1']),
-                         rew_ph_hi: batch['rews'],
-                         dn_ph: batch['done'],
-                        }
-                       
-        q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
-        pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
-        q_hi_outs = sess.run(q_ops, man_feed_dict)
+        for itr in range(ep_len):
+            batch = _man_buffer.sample_batch(batch_size)
+            # subgoal here is the action of manager network, action for computing log-likelihood
+            corr_subgoals = off_policy_correction(subgoals= batch['acts'],s_seq= batch['st_seq'],
+            # shape of corr_subgoals (batch_size, goal_dim)
+            o_seq= batch['ot_seq'], a_seq= batch['at_seq'])
+            q_ops = train_ops['q_ops'] # {'q_ops': step_hi_q_ops, 'pi_ops':step_hi_pi_ops}
+            # action of the manager is subgoal...
+            man_feed_dict = {stt_ph: normalize_observation(full_stt=batch['st']),
+                            stt1_ph: normalize_observation(full_stt=batch['st1']),
+                            sg_ph: normalize_observation(full_stt=batch['acts']),
+                            dg_ph : normalize_observation(full_stt=batch['g']),
+                            dg1_ph : normalize_observation(full_stt=batch['g1']),
+                            aux_ph : normalize_observation(aux=batch['aux']),
+                            aux1_ph : normalize_observation(aux=batch['aux1']),
+                            rew_ph_hi: batch['rews'],
+                            dn_ph: batch['done'],
+                            }
+                        
+            q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
+            pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
+            q_hi_outs = sess.run(q_ops+[man_q_summary], man_feed_dict)
 
-        if step % delayed_update_freq ==0: # delayed update of the policy and target nets.
-            pi_hi_outs = sess.run(pi_ops, man_feed_dict)
-            wandb.log({'policy_loss_hi': pi_hi_outs[0]})
-            rospy.loginfo('writes summary of high-level policy')
-
-        # logging
+            if step % delayed_update_freq ==0: # delayed update of the policy and target nets.
+                pi_hi_outs = sess.run(pi_ops + [man_pi_summary], man_feed_dict)
+                summary_writer.add_summary(pi_hi_outs[-1] , step) # low-pi summary
+            # logging
+                andb.log({'policy_loss_hi': pi_hi_outs[0]})       
         wandb.log({'q1_hi': q_hi_outs[0], 'q2_hi': q_hi_outs[1], 'q1_loss_hi': q_hi_outs[2],
-                     'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'step': step})
+                    'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'global_step': step})
         rospy.loginfo('writes summary of high-level value-ftn')
-
+        summary_writer.add_summary(q_hi_outs[-1] , step) # low-q summary
 
     def normalize_observation(full_stt=None, c_obs=None, aux=None, act=None):
         """ normalizes observations for each step based on running mean-std.
@@ -925,6 +930,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                         manager_temp_transition[2].append(action) # a_seq
                 # buffer store arguments : s_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done 
                 manager_buffer.store(*manager_temp_transition) # off policy correction is done inside the manager_buffer 
+
                 save_rms(step=t)
             # reset the environment since an episode has been finished
             obs = env.reset() #'observation', 'desired_goal', g_des -> task specific goal!
@@ -985,22 +991,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             intrinsic_reward = env.compute_intrinsic_reward(full_stt, next_full_stt, subgoal)
         # subgoal transition
         next_subgoal = env.env_goal_transition(full_stt, next_full_stt, subgoal)
-
-        # rospy.logwarn('=====================================================================')
-        # rospy.logerr('INTRINSIC_REWARD')
-        # print (intrinsic_reward)             
-        # rospy.logerr('FULL_STT')
-        # print (np.linalg.norm(full_stt))
-        # rospy.logerr('NEXT_FULL_STT')
-        # print (np.linalg.norm(full_stt))
-        # rospy.logerr('SUBGOAL')
-        # print (np.linalg.norm(subgoal))        
-        # print (subgoal.shape)        
-        # rospy.logerr('NXT_SG_NORM')
-        # print (np.linalg.norm(next_subgoal))
-        # print (next_subgoal.shape)
-        # rospy.logwarn('=====================================================================')
-
         # add transition for low-level policy
         # (obs, obs1, sg, sg1, stt, stt1, act, aux, rew, done)
         if train_indicator:
@@ -1035,7 +1025,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 # buffer store arguments :    s_seq,    o_seq, a_seq, obs,  obs_1,     dg,    dg_1,      stt, stt_1, act,  aux, aux_1,  rew, done 
                 manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
                 # update running mean-std normalizer
-                # update_rms(full_stt=full_stt, c_obs=c_obs, aux=aux, act=action) # do it.
+                update_rms(full_stt=full_stt, c_obs=c_obs, aux=aux, act=action) # do it.
 
             if t % save_freq == 0 and train_indicator:
                 rospy.loginfo('##### saves network weights ##### for step %d', t)
