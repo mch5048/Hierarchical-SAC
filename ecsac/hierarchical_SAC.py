@@ -178,13 +178,6 @@ def assert_shape(tensor, expected_shape):
     assert all([a == b for a, b in zip(tensor_shape, expected_shape)])
 
 
-def update_summary(summary_writer = None, pi_summray_str=None, v_summray_str=None, global_step=None):
-        pi_summary_str = pi_summray_str
-        v_summary_str = v_summray_str
-        summary_writer.add_summary(pi_summary_str, global_step)
-        summary_writer.add_summary(v_summary_str, global_step)
-
-
 def randomize_world():
 
     # We first wait for the service for RandomEnvironment change to be ready
@@ -290,6 +283,13 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # coefs for nn ouput regularizers
     reg_param = {'lam_mean':1e-3, 'lam_std':1e-3}
     lam_preact = 0.0
+
+    # high-level manager pre-train params
+    # train high-level policy for its mlp can infer joint states
+    # encoding ?? -> rather, shouldn't it be LSTM? g 
+    high_pretrain_steps = 10000000 
+
+
     # wandb
     wandb.config.mananger_propose_freq = manager_propose_freq
     wandb.config.train_manager_freq = train_manager_freq
@@ -323,7 +323,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     np.random.seed(seed)
 
     # arguments for RobotEnv : isdagger, isPOMDP, isGripper, isReal
-    env = robotEnv(isPOMDP=True, isGripper=USE_GRIPPER, isCartesian=USE_CARTESIAN, train_indicator=IS_TRAIN)
+    env = robotEnv(max_steps=max_ep_len, isPOMDP=True, isGripper=USE_GRIPPER, isCartesian=USE_CARTESIAN, train_indicator=IS_TRAIN)
 
     rospy.loginfo("Evironment has been created")
     # instantiate actor-critic nets for controller
@@ -404,6 +404,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # Losses for TD3
         with tf.name_scope('pi_loss_hi'):
             pi_loss_hi = -tf.reduce_mean(q1_pi_hi)
+            l2_loss_pi_hi = tf.losses.get_regularization_loss()
+            pi_loss_hi += l2_loss_pi_hi # regularization loss for the actor
             pi_loss_hi += pi_reg_hi*reg_param['lam_mean'] # regularization loss for the actor
         with tf.name_scope('q_loss_hi'):
             min_q_targ_hi = tf.minimum(q1_targ_hi, q2_targ_hi) # tensor
@@ -411,8 +413,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             q1_loss_hi = tf.losses.mean_squared_error(labels=q_backup_hi, predictions=q1_hi, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q2_loss_hi = tf.losses.mean_squared_error(labels=q_backup_hi, predictions=q2_hi, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q_loss_hi = q1_loss_hi + q2_loss_hi
-            l2_loss_hi = tf.losses.get_regularization_loss()
-            q_loss_hi += l2_loss_hi
+            l2_loss__q_hi = tf.losses.get_regularization_loss()
+            q_loss_hi += l2_loss__q_hi
 
         # define training ops
         with tf.name_scope('optimize'):
@@ -452,6 +454,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
         with tf.name_scope('pi_loss_lo'):
             pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
+            pi_l2_loss_lo = tf.losses.get_regularization_loss()
+            pi_loss_lo += pi_l2_loss_lo
             pi_loss_lo += reg_losses['preact_reg']*reg_param['lam_mean']  # regularization losses for the actor
             pi_loss_lo += reg_losses['std_reg']*reg_param['lam_std']
 
@@ -571,6 +575,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         norm_action = np.clip(action, low, high)
         return norm_action
 
+
     def normalize_subgoal(action, space, batch_size=1, issubgoal=True):
         """ relocate and rescale the aciton of manager policy (subgoal) to desirable values.    
             subgoal_policy = tensor of shape (1, 29(full_stt + ee + gripper) )
@@ -590,8 +595,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                     mean.append(v['mean'])
                     scale.append((v['hi']-v['lo'])/2)
             # here, reloc is the mean
-            # low = np.tile(np.array(low), [batch_size,1])
-            # high = np.tile(np.array(high), [batch_size,1])
             low = np.array(low).reshape(1,-1)
             high = np.array(high).reshape(1,-1)
             mean = np.array(mean).reshape(1,-1)
@@ -611,9 +614,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         """ infer primitive action from low-level policy
             TODO : manage when the obs and sub_goal are batch of actions
             7 joint velocities 
+            TODO : np.copy the observation
         """
         act_op = mu_lo if deterministic else pi_lo # returned from actor_critic function
-        sub_goal, obs = normalize_observation(full_stt=sub_goal.reshape((-1,sub_goal_dim)), c_obs=obs.reshape((-1,)+obs_dim))
+        sub_goal, obs = normalize_observation(full_stt=sub_goal.copy().reshape((-1,sub_goal_dim)), c_obs=obs.copy().reshape((-1,)+obs_dim))
         # TODO: resolve shape mismatching issue
         return np.squeeze(sess.run(act_op, feed_dict={obs_ph: obs,
                                            sg_ph: sub_goal}))
@@ -623,9 +627,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         """ infer subgoal from high-level policy for every freq.
         The output of the higher-level actor net is scaled to an approximated range of high-level acitons.
         7 joint torques : , 7 joint velocities: , 7 joint_positions: , 3-ee positions: , 4-ee quaternions: , 1 gripper_position:
+        TODO : np.copy the observation
         """
-        state = normalize_observation(full_stt=state.reshape((-1, stt_dim)))
-        des_goal = normalize_observation(full_stt=des_goal.reshape((-1,des_goal_dim)))
+        state = normalize_observation(full_stt=state.copy().reshape((-1, stt_dim)))
+        des_goal = normalize_observation(full_stt=des_goal.copy().reshape((-1,des_goal_dim)))
         return np.squeeze(sess.run(mu_hi, feed_dict={stt_ph: state,    
                                           dg_ph: des_goal}))
 
@@ -668,13 +673,13 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # logging
             if itr % 10 == 0:
                 wandb.log({'policy_loss_lo': low_outs[0], 'q1_loss_lo': low_outs[1],
-
                             'q2_loss_lo': low_outs[2], 'q1_lo': low_outs[3], 
                             'q2_lo': low_outs[4], 'alpha': low_outs[10], 'global_step': step})
 
         summary_writer.add_summary(low_outs[-3], step) # low-pi summary
         summary_writer.add_summary(low_outs[-2], step) # low-q1 summary
         summary_writer.add_summary(low_outs[-1], step) # low-q2 summary
+
 
     def off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=100, discount=gamma, polyak=polyak):
         """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
@@ -706,42 +711,33 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # loc 
         random_goals = np.random.normal(loc=diff_goal, size=(batch_size, candidate_goals, original_goal.shape[-1]) ) #loc = mean of distribution
         rg_shape = random_goals.shape 
-
         candidates = np.concatenate([original_goal, diff_goal, random_goals], axis=1)
-
         _s_seq = np.array(_s_seq)[:,:-1,:] # check if s_seq has one more transition than required
         _o_seq = np.array(_o_seq)[:,:-1,:] # check if o_seq has one more transition than required
         _a_seq = np.array(_a_seq)
         seq_len = len(_s_seq[0])
-
         # flatten along the seq-dim
         flat_batch_size = seq_len*batch_size
         action_dim = _a_seq[0][0].shape
         state_dim = _s_seq[0][0].shape # except for the auxiliary observation
         obs_dim = _o_seq[0][0].shape # since the shape is (batch, seq_len,) + shape
         ncands = candidates.shape[1] # 10          
-
         #     # for off_policy correction, we need 
         #     # s_t:t+c-1
         rollout_actions = _a_seq.reshape((flat_batch_size,) + action_dim) #pi_lo actions from rollout
         states = _s_seq.reshape((flat_batch_size,) + state_dim) 
         observations = _o_seq.reshape((flat_batch_size,) + obs_dim)
-
         # shape of the np.array 'observations' -> (flat_batch_size, 24)
         # shape of the np.array 'batched_candidiates[i]' -> (flat_batch_size, 24)
         batched_candidates = np.tile(candidates, [seq_len, 1, 1]) # candidate goals
-
         batched_candidates= batched_candidates.transpose(1,0,2)
-
         pi_lo_actions = np.zeros((ncands, flat_batch_size) + action_dim) # shape (10, flat_batch_size, 8)
-
         # for which goal the new low policy would have taken the same action as the old one?
         # TODO: debug the shape for the batch action estimations
         # (1000, 100, 100, 3)
         # (10, 29)
         for c in range(ncands): # one sample for each iteration?
             pi_lo_actions[c] = get_action(observations, batched_candidates[c]) #320 action estimations for each candidate out of 10
-
         # now compute the approx. lob prob. of the policy : eq.(5) in the paper
         difference = pi_lo_actions - rollout_actions # broadcasted, (10, flat_batch_size, 8) 
         difference = difference.reshape((ncands, batch_size, seq_len)+ action_dim) # shape (10, batch_size, 10, 8)
@@ -752,6 +748,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # shape of max_indices ->(batch_size,) -> index along 10 candidates for each batch
         # shape of the candidates (batch, n_cands, goal_dim)
         return candidates[np.arange(batch_size),max_indicies] # [for each batch, max index]
+
 
     def train_high_level_manager(train_ops, buffer, ep_len=(max_ep_len/manager_propose_freq), batch_size=batch_size, discount=gamma, polyak=polyak, step=0):
         """ train high-level actor-critic for each episode's (timesteps/manager_train_freq)
@@ -869,14 +866,31 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         summary_manager.s_t5_rms.save_mean_std(rms_path+'mean_std5.bin')
         summary_manager.s_t6_rms.save_mean_std(rms_path+'mean_std6.bin')
         summary_manager.a_t_rms.save_mean_std(rms_path+'mean_std7.bin')
+    
+    # TODO : implement high-level pre-train procedure here
 
-    DEMO_USE = False # DAgger should be reimplemented 
-    # os.chdir(DEMO_DIR)
+
+    TRAIN_HIGH_LEVEL = False # DAgger should be reimplemented 
+    
+    if TRAIN_HIGH_LEVEL: 
+        raise NotImplementedError
+        for tr in range(high_pretrain_steps) and not rospy.is_shutdown():
+            obs = env.reset() #'observation', 'desired_goal', g_des -> task specific goal!
+            done = False
+            reset = False
+            ep_len = 0 # length of the episode
+            ep_ret = 0 # episode return for the manager
+            ep_low_ret = 0 # return of the intrinsic reward for low level controller 
+            episode_num += 1 # for every env.reset()
+    
+    
+    
+    
 
     # how demo transition consists of
     # obs_t,  stt_t, act_t,   rew_t, obs_t+1, stt_t+1, done
-    # TODO: implement demo acquisition into the buffer
-    # TODO: implement usage of pre-trained network
+    # TODO : implement demo acquisition into the buffer
+    # TODO : implement usage of pre-trained network
 
     if noise_type == "normal":
         subgoal_noise = Gaussian(mu=np.zeros(sub_goal_dim), sigma=noise_stddev*np.ones(sub_goal_dim))
@@ -903,6 +917,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         new_saver.restore(sess, os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}'.format(DATA_LOAD_STEP))
     # Main loop: collect experience in env and update/log each epoch
     while not rospy.is_shutdown() and t <int(total_steps):
+
         if done or ep_len== max_ep_len: # if an episode is finished (no matter done==True)
             if t != 0 and train_indicator:
                 # train_low level controllers for the length of this episode
@@ -989,6 +1004,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             manager_temp_transition[2].append(action)     # append a_seq        
             # compute intrinsic reward
             intrinsic_reward = env.compute_intrinsic_reward(full_stt, next_full_stt, subgoal)
+
+
         # subgoal transition
         next_subgoal = env.env_goal_transition(full_stt, next_full_stt, subgoal)
         # add transition for low-level policy
