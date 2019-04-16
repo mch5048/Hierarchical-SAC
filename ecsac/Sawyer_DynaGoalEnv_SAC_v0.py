@@ -165,6 +165,7 @@ class robotEnv():
         self.block_pose = Pose()
         # joint command publisher
         self.jointCmdPub = rospy.Publisher('/robot/limb/right/joint_command', JointCommand, tcp_nodelay=True, queue_size=1)
+        self.demo_target_pub = rospy.Publisher('/demo/target/', Pose)
         self.resize_factor = 100/400.0
         self.resize_factor_real = 100/400.0
         self.tf_listenser = tf.TransformListener()
@@ -485,11 +486,6 @@ class robotEnv():
         block_pose = self.gen_block_pose()
         self._delete_target_block()
         self._delete_table()
-        # object_state_srv = rospy.ServiceProxy('/gazebo/get_model_state', GetModelState)
-        # # object_state = object_state_srv("block", "world")
-        # object_state = object_state_srv("block", "base")
-        # self._obj_pose = np.array([object_state.pose.position.x, object_state.pose.position.y, object_state.pose.position.z])       
-        # print object_state.pose.position.z
         _des_goal = self._reset_desired_goal(goal_pose=block_pose, block_pose=block_pose)
 
         starting_joint_angles['right_j0'] = np.random.uniform(-0.05, 0.05)
@@ -501,7 +497,6 @@ class robotEnv():
         starting_joint_angles['right_j2'], starting_joint_angles['right_j3'],
         starting_joint_angles['right_j4'], starting_joint_angles['right_j5'],
         starting_joint_angles['right_j6']]
-        # _ = self.move_to_start_vel_command(start_pose)
         _ = self.move_to_start(starting_joint_angles)
         print("Moving the right arm to start pose...")
         self.gripper_open()
@@ -585,24 +580,6 @@ class robotEnv():
               return False
 
 
-    def move_to_start_vel_command(self, joint_pose):
-        
-        _joint_pose = joint_pose
-        '''
-          1. execute FK (joint pose -> ee pose) for start pose of robot
-          2. get Cartesian pose of the robot
-          3. 
-        '''
-        _pose = self.fk_service_client(_joint_pose)
-
-        rospy.set_param('vel_calc','true')
-        self.servo_vel(_pose)
-        if rospy.has_param('vel_calc'):
-            rospy.logwarn('Initialized pose.')
-            rospy.delete_param('vel_calc')
-        return False
-
-
     def gripper_open(self):
         self.gripper.open()
 
@@ -625,8 +602,7 @@ class robotEnv():
     def _get_msg(self, tf_mat):
         _kdl_fr = pm.fromMatrix(tf_mat)
         _msg = pm.toMsg(_kdl_fr)
-        # _quat = _kdl_fr.M.GetQuaternion() # x, y, z, w
-        # _tr = _kdl_fr.p # x, y, z, w
+
         return _msg
 
 
@@ -664,15 +640,13 @@ class robotEnv():
             TODO: merge check_path_stop method
         """
         current_pose = self._limb.endpoint_pose()
-
         X_current = self._get_tf_matrix(current_pose)
         X_goal = self._get_tf_matrix(pose)
 
-        # list of 
+
         traj = mr.CartesianTrajectory(X_current, X_goal, Tf=5, N=num_wp, method=3)
 
         for idx, X in enumerate(traj):
-            print (X)
             _pose = self._get_msg(X)
             self.ikVelPub.publish(_pose)
             self._check_traj(_pose, idx)
@@ -683,7 +657,6 @@ class robotEnv():
             the orientation of the e,e, should be varied while satisfying the position.
             TODO: Use Sawyer velocity controller class 
         """
-        rospy.set_param('vel_calc', 'true') # start the velocity controller
         # random position // quaterion from RPY
         _ori_x = np.random.uniform(3.05,3.20)
         _ori_y = np.random.uniform(-0.35,0.45)
@@ -698,6 +671,7 @@ class robotEnv():
         self.gripper_open()
         self._servo_to_pose(start_pose)
         self._load_table()
+        self.demo_target_pub.publish(block_pose) # publish target pose for velocity controller
         self._load_target_block(block_pose=block_pose) 
         rospy.sleep(1.0)
         self.gripper_close()

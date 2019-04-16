@@ -907,7 +907,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     done = True
     reset = False
     manager_temp_transition = list() # temp manager transition
-    controller_transition = list() # temp controller transition
     if train_indicator: # train
         saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
     else: # test

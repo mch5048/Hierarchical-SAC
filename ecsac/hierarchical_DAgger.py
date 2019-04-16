@@ -104,17 +104,27 @@ class DemoReplayBuffer(object):
         self.done_buf[self.ptr] = done
         self.aux_buf[self.ptr] = aux
         self.aux1_buf[self.ptr] = aux
-
         if not manager:
             self.ptr = (self.ptr+1) % self.max_size
             self.size = min(self.size+1, self.max_size)
+
+
+    def get_episodic_subgoal(self, global_step, ep_len):
+        """ Return the subgoal and fullstate batch of the episode.
+        <s, s', g, g'>
+        slicing index : buf[global_step - ep_len:global_step-1]
+        """
+        return [self.stt_buf[global_step-ep_len:global_step-1], self.stt1_buf[global_step-ep_len:global_step-1], 
+                self.g_buf[global_step-ep_len:global_step-1], self.g1_buf[global_step-ep_len:global_step-1]]
+
 
     def return_buffer(self):
         """ Returns the whole numpy arrays containing demo transitions.
         """
         return {'data':[self.obs_buf, self.obs1_buf, self.g_buf, self.g1_buf, self.stt_buf, self.stt1_buf,
-                self.act_buf, self.rews_buf, self.done_buf, self.aux_buf, self.aux1_buf]
+                self.act_buf, self.rews_buf, self.done_buf, self.aux_buf, self.aux1_buf],
                 'size':self.size}
+
 
 class DemoManagerReplayBuffer(DemoReplayBuffer):
     """
@@ -129,7 +139,7 @@ class DemoManagerReplayBuffer(DemoReplayBuffer):
         action seqence -> they are stored as s_t:t+c/o_t:t+c, while action is stored as a_t:t+c
         """
 
-        super(ManagerReplayBuffer, self).__init__(obs_dim, stt_dim, act_dim, aux_dim, size, manager=True)
+        super(DemoReplayBuffer, self).__init__(obs_dim, stt_dim, act_dim, aux_dim, size, manager=True)
 
         self.stt_seq_buf = np.zeros(shape=(size, seq_len+1, stt_dim), dtype=np.float32) # s_t (-1, 10+1, 21), joint pos, vel, eff
         self.obs_seq_buf = np.zeros(shape=(size, seq_len+1,)+ obs_dim, dtype=np.float32) # o_t, (-1, 10+1, 100, 100, 3)
@@ -138,7 +148,7 @@ class DemoManagerReplayBuffer(DemoReplayBuffer):
     def store(self, stt_seq, obs_seq, act_seq, *args, **kwargs):
         """store step transition in the buffer
         """
-        super(ManagerReplayBuffer, self).store(manager=True, *args, **kwargs)
+        super(DemoReplayBuffer, self).store(manager=True, *args, **kwargs)
         
         self.stt_seq_buf[self.ptr] = np.array(stt_seq)
         self.obs_seq_buf[self.ptr] = np.array(obs_seq)
@@ -146,7 +156,7 @@ class DemoManagerReplayBuffer(DemoReplayBuffer):
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
 
-        def return_buffer(self):
+    def return_buffer(self):
         """ Returns the whole numpy arrays containing demo transitions, for manager transitions
         """
         return {'data':[self.obs_buf, self.obs1_buf, self.g_buf, self.g1_buf, self.stt_buf, self.stt1_buf,
@@ -220,7 +230,6 @@ if __name__ == '__main__':
 
     isDemo = True
     ep_ret, ep_len = 0, 0
-    total_steps = steps_per_epoch * epochs # total interaction steps in terms of training.
     t = 0 # counted steps [0:total_steps - 1]
     timesteps_since_manager = 0 # to count c-step elapse for training manager
     timesteps_since_subgoal = 0 # to count c-step elapse for subgoal proposal
@@ -228,25 +237,26 @@ if __name__ == '__main__':
     done = True
     reset = False
     manager_temp_transition = list() # temp manager transition
-    controller_transition = list() # temp controller transition
 
     env = robotEnv(max_steps=max_ep_len, control_mode='velocity', isPOMDP=True, isGripper=USE_GRIPPER, isCartesian=USE_CARTESIAN, train_indicator=IS_TRAIN)
-    controller_buffer = ReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=buffer_size)
-    manager_buffer = ManagerReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=buffer_size, seq_len=manager_propose_freq)
-        
+    controller_buffer = DemoReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=buffer_size)
+    manager_buffer = DemoManagerReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=buffer_size, seq_len=manager_propose_freq)
+    summary_manager = SummaryManager() # manager for rms
+
+
     def update_rms(full_stt=None, c_obs=None, aux=None, act=None):
-            """Update the mean/stddev of the running mean-std normalizers.
-            Normalize full-state, color_obs, and auxiliary observation.
-            Caution on the shape!
-            """
-            summary_manager.s_t0_rms.update(c_obs) # c_obs
-            summary_manager.s_t1_rms.update(full_stt[:7]) # joint_pos
-            summary_manager.s_t2_rms.update(full_stt[7:14]) # joint_vel
-            summary_manager.s_t3_rms.update(full_stt[14:21]) # joint_eff
-            summary_manager.s_t4_rms.update(full_stt[21:22]) # gripper_position
-            summary_manager.s_t5_rms.update(full_stt[22:]) # ee_pose
-            summary_manager.s_t6_rms.update(aux) # aux
-            summary_manager.a_t_rms.update(act) # ee_pose
+        """Update the mean/stddev of the running mean-std normalizers.
+        Normalize full-state, color_obs, and auxiliary observation.
+        Caution on the shape!
+        """
+        summary_manager.s_t0_rms.update(c_obs) # c_obs
+        summary_manager.s_t1_rms.update(full_stt[:7]) # joint_pos
+        summary_manager.s_t2_rms.update(full_stt[7:14]) # joint_vel
+        summary_manager.s_t3_rms.update(full_stt[14:21]) # joint_eff
+        summary_manager.s_t4_rms.update(full_stt[21:22]) # gripper_position
+        summary_manager.s_t5_rms.update(full_stt[22:]) # ee_pose
+        summary_manager.s_t6_rms.update(aux) # aux
+        summary_manager.a_t_rms.update(act) # ee_pose
 
 
     def load_rms():
@@ -279,20 +289,62 @@ if __name__ == '__main__':
         return np.zeros(sub_goal_dim)
 
 
-    def demo_subgoal_transition():
-        """ replace the temp subgoals in temp manager buffer with expert subgoals for the rollout batches.
-        TODO: implement this function!
+    def demo_manager_sg_transition(manager_transition):
+        """ This function is called every C-step.
+            replace the temp subgoals in temp manager buffer with expert subgoals for the rollout batches.
+            The demo agent achieves the subgoal for every step, i.e. h = s + g - s'
+                g_t == s_t+c (action of the manager)
+            *manager_transition :
+                [s_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done]
+            replace the temp. subgoal (a_t of the manager) with s_t+c-1
         """
-        raise NotImplementedError
+        manager_transition[-5] = manager_transition[0][-1]
+        return manager_transition
 
+
+    def demo_controller_sg_transition(controller_buffer, global_step, ep_len):
+        """ This function is called at the end of each episode.
+            *controller_buffer :
+                controller_buffer.store(c_obs, next_c_obs, subgoal, 
+                next_subgoal, full_stt, next_full_stt, action, aux, next_aux, intrinsic_reward, done)
+            subgoal for the controller -> for every C-step sequence,
+            * h = s + g - s'
+                g_t == s_t+c, g' = h(s,g,s'), g'' = h(s',g',s'') ...
+            *don't do subgoal_transition and intrinsic reward computation while doing rollouts.    
+            controller transition (s_t||s_t+c & s_t+1||s_t+c+1) -> TD learning
+            in terms of controller -> g_t:t+c-1
+            index : 2 & 3
+        """
+        # s_t+c should be the g_t for s_t. (e.g. s_10 == g_0 -> induces new proposal)
+        sb, s1b, gb, g1b = controller_buffer.get_episodic_subgoal(global_step, ep_len) # returns each batch of the transition e<s, s', g, g'>
+        # ep_len - ep_len % manager_propose_freq
+        # Example : if an episode is 647 length, iterate till 640 (idx 639). Then, gb[640:646] should all be the terminal state. 
+        # 1. replace the subgoal proposals in 'gb'
+        remainder = ep_len % manager_propose_freq
+        for idx in range(0, ep_len - remainder - manager_propose_freq, manager_propose_freq): # iterate until the full proposal period is met.
+            gb[idx] = s1b[idx + manager_propose_freq - 1] # s1b[idx + manager_propose_freq - 1] has the s_(idx + manager_propose_freq)
+            for i in range(1, manager_propose_freq): #[t+1:t+c-1]
+                gb[idx + i] = env.env_goal_transition(sb[idx + i], s1b[idx + i], gb[idx])
+        # 2. fill ther remaining transitions with terminal state observations
+        # here, gb[-1], gb[-2], ... gb[-7] = sT in example. 
+        sT = s1b[-1]
+        for idx in range(1,remainder + 1):
+            gb[-idx] = sT
+        # 3. copy the gb into g1b, with the index offset of 1. Then the last element of g1b is sT.
+        g1b[:-1] = gb[1:]
+        g1b[-1] = sT
+            
 
     def get_action():
         """ return the action inference from the external controller.
         """
         return env._get_demo_aciton()
 
+    # divide the loop into two phase.
+    # 1. rollout (collecting normal transition data (s, a, r, s', d))
 
     while not rospy.is_shutdown() and t <int(total_steps):
+
         if done or ep_len== max_ep_len: # if an episode is finished (no matter done==True)
             if t != 0:
                 # Process final state/obs, store manager transition i.e. state/obs @ t+c
@@ -305,18 +357,18 @@ if __name__ == '__main__':
                     manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode
                 # make sure every manager transition have the same length of sequence
                 # TODO: debug here...
-                if len(manager_temp_transition[0]) <= manager_propose_freq: # len(state_seq) = propose_freq +1 since we save s_t:t+c as a seq.
+                if len(manager_temp_transition[0]) <= manager_propose_freq: # len(state_seq) = propose_1freq +1 since we save s_t:t+c as a seq.
                     while len(manager_temp_transition[0]) <= manager_propose_freq:
                         manager_temp_transition[0].append(full_stt) # s_seq
                         manager_temp_transition[1].append(c_obs) # o_seq
-                        manager_temp_transition[2].append(action) # a_seq
-                
-                manager_temp_transition = demo_subgoal_transition(manager_temp_transition)
+                        manager_temp_transition[2].append(action) # a_seq0
+                manager_temp_transition = demo_manager_sg_transition(manager_temp_transition)
+                demo_controller_sg_transition(controller_buffer, t, ep_len) # verify if the member of the buffer class is successfully modified.
                 # buffer store arguments : s_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done 
                 manager_buffer.store(*manager_temp_transition) # off policy correction is done inside the manager_buffer 
                 save_rms(step=t)
             # reset the environment since an episode has been finished
-            obs = env.reset() #'observation', 'desired_goal', g_des -> task specific goal!
+            obs = env.reset_demo() #'observation', 'desired_goal', g_des -> task specific goal!
             done = False
             reset = False
             ep_len = 0 # length of the episode
@@ -339,15 +391,11 @@ if __name__ == '__main__':
             # buffer store arguments :    s_seq,    o_seq, a_seq, obs,  obs_1,     dg,    dg_1,      stt, stt_1, act,  aux, aux_1,  rew, done 
             manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
 
-        if t < low_start_timesteps:
-            action = sample_action(act_dim) # a_t
-        else:
-            action = get_action(c_obs, subgoal, deterministic= not train_indicator) # a_t
+        action = get_action() # a_t
             # TODO: make action on the gripper as categorical policy
             # action[-1] = reloc_rescale_gripper(action[-1])
-        next_obs, manager_reward, done = env.step(action, time_step=ep_len) # reward R_t-> for high-level manager -> for sum(R_t:t+c-1)
-        if train_indicator:
-            randomize_world()
+        next_obs, manager_reward, done = env.step_demo(action, time_step=ep_len) # reward R_t-> for high-level manager -> for sum(R_t:t+c-1)
+        randomize_world()
         # update episodic logs
         # Ignore the "done" signal if it comes from hitting the time
         # horizon (that is, when it's an artificial terminal signal
@@ -362,24 +410,21 @@ if __name__ == '__main__':
         next_c_obs = next_obs['observation']['color_obs'] #o_t
         next_aux = obs['auxiliary'] # g_des
 
-        if train_indicator:
-            # append manager transition
-            manager_temp_transition[-1] = float(True)
-            manager_temp_transition[-2] += manager_reward # sum(R_t:t+c)
-            manager_temp_transition[0].append(next_full_stt) # append s_seq
-            manager_temp_transition[1].append(next_c_obs) # append o_seq
-            manager_temp_transition[2].append(action)     # append a_seq        
-            # compute intrinsic reward
-            intrinsic_reward = env.compute_intrinsic_reward(full_stt, next_full_stt, subgoal)
-
+        # append manager transition
+        manager_temp_transition[-1] = float(True)
+        manager_temp_transition[-2] += manager_reward # sum(R_t:t+c)
+        manager_temp_transition[0].append(next_full_stt) # append s_seq
+        manager_temp_transition[1].append(next_c_obs) # append o_seq
+        manager_temp_transition[2].append(action)     # append a_seq        
+        # compute intrinsic reward
+        intrinsic_reward = env.compute_intrinsic_reward(full_stt, next_full_stt, subgoal)
 
         # subgoal transition
         next_subgoal = env.env_goal_transition(full_stt, next_full_stt, subgoal)
         # add transition for low-level policy
         # (obs, obs1, sg, sg1, stt, stt1, act, aux, rew, done)
-        if train_indicator:
-            controller_buffer.store(c_obs, next_c_obs, subgoal, 
-            next_subgoal, full_stt, next_full_stt, action, aux, next_aux, intrinsic_reward, done)
+        controller_buffer.store(c_obs, next_c_obs, subgoal, 
+        next_subgoal, full_stt, next_full_stt, action, aux, next_aux, intrinsic_reward, done)
         # update observations and subgoal
         obs = next_obs
         subgoal = next_subgoal
@@ -391,137 +436,33 @@ if __name__ == '__main__':
         timesteps_since_manager += 1
         timesteps_since_subgoal += 1
 
-        if train_indicator:        
-            if timesteps_since_subgoal % manager_propose_freq == 0:
-                # for every c-step, renew the subgoal estimation from the manager policy.
-                timesteps_since_subgoal = 0
-                manager_temp_transition[4] = c_obs # save o_t+c
-                manager_temp_transition[8] = full_stt # save s_t+c
-                manager_temp_transition[11] = aux # save aux_t+c
-                manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode 
-                
-                # intentional seq appending is not required here since it always satisfies c step.
-                manager_buffer.store(*manager_temp_transition)
-                subgoal = get_subgoal(full_stt, des_goal) # action_dim = (1, stt_dim) -> defaults to 25-dim
-                _subgoal_noise = subgoal_noise() # random sample when called
-                subgoal += _subgoal_noise
-                # Create a high level transition : note that the action of manager policy is subgoal
-                # buffer store arguments :    s_seq,    o_seq, a_seq, obs,  obs_1,     dg,    dg_1,      stt, stt_1, act,  aux, aux_1,  rew, done 
-                manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
-                # update running mean-std normalizer
-                update_rms(full_stt=full_stt, c_obs=c_obs, aux=aux, act=action) # do it.
-
-            if t % save_freq == 0 and train_indicator:
-                rospy.loginfo('##### saves network weights ##### for step %d', t)
-                saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
-                saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac.ckpt'), global_step=t)  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    for e in range(episode_count):
-
-        data_aggr_list = []
-        rospy.loginfo("Now It's EPISODE{0}".format(e))
-        observation = env.reset_teaching() # done-> False
-        o_t = np.array(observation[0])
-        s_t = [np.array(observation[1]), np.array(observation[2]), np.array(observation[3]), np.array(observation[4])]
-
-        if e == 0:
-            o_t_rms = RunningMeanStd(shape=(1,) + o_t.shape)
-            s_t0_rms = RunningMeanStd(shape=(1,) + s_t[0].shape) # q
-            s_t1_rms = RunningMeanStd(shape=(1,) + s_t[1].shape) # q_dot
-            s_t2_rms = RunningMeanStd(shape=(1,) + s_t[2].shape) # q_ddot
-            s_t3_rms = RunningMeanStd(shape=(1,) + s_t[3].shape) # obj_pos
-
-        s_t[0] = s_t[0].reshape(1,s_t[0].shape[0])
-        s_t[1] = s_t[1].reshape(1,s_t[1].shape[0])
-        s_t[2] = s_t[2].reshape(1,s_t[2].shape[0])
-        s_t[3] = s_t[3].reshape(1,s_t[3].shape[0])
-        o_t = np.reshape(o_t,(-1,100,100,3))
-
-        s_t = np.concatenate(s_t,axis=-1)
-        s_t = np.squeeze(s_t)
-
-        o_t = normalize(o_t, o_t_rms)
-        s_t[:7] = normalize(s_t[:7], s_t0_rms)
-        s_t[14:21] = normalize(s_t[14:21], s_t2_rms)
-        s_t[21:] = normalize(s_t[21:], s_t3_rms)
-
-        step = 0
-        done = False
-        for s in range(max_steps):
-
-            randomize_world()
-            start_time = time.time()
-            rospy.sleep(0.008)
-            a_t = np.array(env.getAction_Dagger())
-
-            observation, r_t, done = env.step_teaching(step)
-
-            o_t_1 = np.array(observation[0])
-            s_t_1 = [np.array(observation[1]), np.array(observation[2]), np.array(observation[3]),  np.array(observation[4])]
+        if timesteps_since_subgoal % manager_propose_freq == 0:
+            # for every c-step, renew the subgoal estimation from the manager policy.
+            timesteps_since_subgoal = 0
+            manager_temp_transition[4] = c_obs # save o_t+c
+            manager_temp_transition[8] = full_stt # save s_t+c
+            manager_temp_transition[11] = aux # save aux_t+c
+            manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode 
             
-            s_t_1[0] = s_t_1[0].reshape(1,s_t_1[0].shape[0])
-            s_t_1[1] = s_t_1[1].reshape(1,s_t_1[1].shape[0])
-            s_t_1[2] = s_t_1[2].reshape(1,s_t_1[2].shape[0])
-            s_t_1[3] = s_t_1[3].reshape(1,s_t_1[3].shape[0])
+            # intentional seq appending is not required here since it always satisfies c step.
+            manager_buffer.store(*manager_temp_transition)
+            subgoal = get_subgoal(full_stt, des_goal) # action_dim = (1, stt_dim) -> defaults to 25-dim
+            _subgoal_noise = subgoal_noise() # random sample when called
+            subgoal += _subgoal_noise
+            # Create a high level transition : note that the action of manager policy is subgoal
+            # buffer store arguments :    s_seq,    o_seq, a_seq, obs,  obs_1,     dg,    dg_1,      stt, stt_1, act,  aux, aux_1,  rew, done 
+            manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
+            # update running mean-std normalizer
+            update_rms(full_stt=full_stt, c_obs=c_obs, aux=aux, act=action) # do it.
 
-            o_t_1 = np.reshape(o_t_1,(-1,100,100,3))
-            s_t_1 = np.concatenate(s_t_1,axis=-1)
-            s_t_1 = np.squeeze(s_t_1)
+    # if all the demo episodes have ended.
 
-            _rms_o_t_1 = o_t_1[:]
-            _rms_s_t_1 = s_t_1[:]
-
-            o_t_1 = normalize(o_t_1, o_t_rms) # DO NOT NORMALIZE VISUAL OBSERVATION
-            s_t_1[:7] = normalize(s_t_1[:7], s_t0_rms)
-            s_t_1[7:14] = normalize(s_t_1[7:14], s_t1_rms)
-            s_t_1[14:21] = normalize(s_t_1[14:21], s_t2_rms)
-            s_t_1[21:] = normalize(s_t_1[21:], s_t3_rms)
-
-            # must include isDemo for DDPGfD
-            data_aggr_list.append([o_t, s_t, a_t, r_t, o_t_1, s_t_1, done, isDemo])     
-            elapsed_time = time.time() - start_time
-
-            total_time +=elapsed_time
-            o_t_rms.update(_rms_o_t_1)
-            s_t0_rms.update(_rms_s_t_1[:7])
-            s_t1_rms.update(_rms_s_t_1[7:14])
-            s_t2_rms.update(_rms_s_t_1[14:21])
-            s_t3_rms.update(_rms_s_t_1[21:])
-
-
-            if np.mod(s, 10) == 0:
-                    print("Episode", e, "Step", step, "Action", a_t ,"10step-Time", total_time)
-                    total_time = 0
-            if done:
-                print 'Episode done'
-                break
-            o_t = np.copy(o_t_1)
-            s_t = s_t_1[:]
-
-            print 
-            step += 1            
-        print ('End of episode'+str(e))   
-
-        print ('extends trajectories to total list')
-        data_aggr_total_list.extend(data_aggr_list)
-
-
-    print ('Now saves the collected tra jectory in pickle format')
-    os.chdir('/home/irobot/catkin_ws/src/ddpg/scripts')
-    with open ('traj_dagger.bin', 'wb') as f:             
-        pickle.dump(data_aggr_total_list, f)
+    os.chdir(demo_path)
+    print ('Now saves the manager buffer in pickle format')
+    with open ('demo_manager_buffer.bin', 'wb') as f:             
+        pickle.dump(manager_buffer, f)
+    print ('Now saves the controller buffer in pickle format')
+    with open ('demo_manager_buffer.bin', 'wb') as f:             
+        pickle.dump(controller_buffer, f)
 
 

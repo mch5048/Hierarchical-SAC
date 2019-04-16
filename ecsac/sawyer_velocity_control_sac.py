@@ -26,6 +26,7 @@ from geometry_msgs.msg import Pose, Point, Quaternion
 from urdf_parser_py.urdf import URDF
 from pykdl_utils.kdl_kinematics import KDLKinematics
 import intera_interface
+from intera_core_msgs.msg import EndpointState
 
 # Local Imports
 import sawyer_MR_description as s
@@ -47,13 +48,13 @@ class VelocityControl(object):
         with cl.suppress_stdout_stderr():    # Eliminates urdf tag warnings
             self.robot = URDF.from_parameter_server()
 
-        self.kin = KDLKinematics(self.robot, "base", "right_gripper")
-        # self.kin= KDLKinematics(self.robot, "base", "right_gripper_tip")
+        # self.kin = KDLKinematics(self.robot, "base", "right_gripper")
+        self.kin= KDLKinematics(self.robot, "base", "right_gripper_tip")
 
         self.names = self.kin.get_joint_names()
 
-        self.arm = intera_interface.Limb("right")
-        self.hand = intera_interface.gripper.Gripper('right')
+        self.limb = intera_interface.Limb("right")
+        self.gripper = intera_interface.gripper.Gripper('right')
         # Grab M0 and Blist from saywer_MR_description.py
         self.M0 = s.M #Zero config of right_hand
         self.Blist = s.Blist #6x7 screw axes mx of right arm
@@ -69,46 +70,101 @@ class VelocityControl(object):
         self.q = np.zeros(7)        # Joint angles
         self.qdot = np.zeros(7)     # Joint velocities
         self.T_goal = np.array(self.kin.forward(self.q))    # Ref se3
+        self.original_goal = self.T_goal.copy()    # Ref se3
         # print self.T_goal
         self.isCalcOK = False
         self.isPathPlanned = False
+        self.traj_err_bound = float(1e-2) # in meter
         # Subscriber
-        self.ref_pose_sub = rospy.Subscriber('/teacher/ik_vel/', Pose, self.ref_pose_cb)
+        self.ee_position = [0.0, 0.0, 0.0]
+        self.ee_orientation = [0.0, 0.0, 0.0, 0.0]
 
-        self.hand.calibrate()
+        rospy.Subscriber('/demo/target/', Pose, self.ref_poseCB)
+        rospy.Subscriber('/robot/limb/right/endpoint_state', EndpointState , self.endpoint_poseCB)
+
+        self.gripper.calibrate()
+        # path planning
+        self.num_wp = int(5)
+        self.cur_wp_idx = int(0) # [0:num_wp - 1]
+        self.traj_list = [None for _ in range(self.num_wp)]
 
         self.r = rospy.Rate(100)
+        # control loop
         while not rospy.is_shutdown():
             if rospy.has_param('vel_calc'):
                 if not self.isPathPlanned: # if path is not planned
-                    self.path_planning()
+                    self.path_planning() # get list of planned waypoints
                 self.calc_joint_vel_2()
-                self.r.sleep()
-            else:
-                # print '...'
-                pass
+            self.r.sleep()
 
-    def path_planning(self, pose):
-        """ Generate desriable waypoints for achieving target pose.
-        """
 
-        return True
-
-    def ref_pose_cb(self, some_pose): # Takes target pose, returns ref se3
+    def ref_poseCB(self, goal_pose): # Takes target pose, returns ref se3
         rospy.logdebug("ref_pose_cb called in velocity_control.py")
         # p = np.array([some_pose.position.x, some_pose.position.y, some_pose.position.z])
-        p = np.array([some_pose.position.x, some_pose.position.y, some_pose.position.z])
-        quat = np.array([some_pose.orientation.x, some_pose.orientation.y, some_pose.orientation.z, some_pose.orientation.w])
+        p = np.array([goal_pose.position.x, goal_pose.position.y, goal_pose.position.z])
+        quat = np.array([goal_pose.orientation.x, goal_pose.orientation.y, goal_pose.orientation.z, goal_pose.orientation.w])
         goal_tmp = tr.compose_matrix(angles=tr.euler_from_quaternion(quat, 'sxyz'), translate=p) # frame is spatial 'sxyz', return Euler angle from quaternion for specified axis sequence.
         with self.mutex:
-            self.T_goal = goal_tmp
-        # self.joint_com_published = True
+            self.original_goal = goal_tmp
+
+
+    def endpoint_poseCB(self, ee_pose):
+        self.ee_position = [ee_pose.position.x, ee_pose.position.y, ee_pose.position.z]
+        self.ee_orientation = [ee_pose.orientation.x, ee_pose.orientation.y, ee_pose.orientation.z, ee_pose.orientation.w]
+
+
+    def _get_ee_position(self):
+        return self.ee_position
+
+
+    def _get_goal_matrix(self):
+        return self.traj_list[self.cur_wp_idx]
+
+
+    def path_planning(self, num_wp=self.num_wp):
+        """ Generate desriable waypoints for achieving target pose.
+        """
+        current_pose = self._limb.endpoint_pose()
+        X_current = self._get_tf_matrix(current_pose)
+        X_goal = self.original_goal
+        self.traj_list = mr.CartesianTrajectory(X_current, X_goal, Tf=5, N=num_wp, method=3)
+        # self.T_goal = self.traj_list[self.cur_wp_idx] # set T_goal as the starting waypoint (robot's current pose)
+        self.isPathPlanned = True
+
+
+    def _check_traj(self):
+        """Check if the end-effector has reached the desired position of target waypoint.
+        """
+        _ee_position = self._get_ee_position()
+        _targ_wp_position = tf.translation_from_matrix(self.traj_list[self.cur_wp_idx])
+        if np.linal.norm( np.array(_ee_position) -_targ_wp_position) <= self.traj_err_bound:
+            rospy.loginfo('reached waypoint %d', self.cur_wp_idx)
+            if self.cur_wp_idx < self.num_wp - 1: # indicate next waypoint
+                self.cur_wp_idx += 1
+            elif self.cur_wp_idx == self.num_wp - 1: # robot has reached the last waypoint
+                self.cur_wp_idx = 0
+                rospy.delete_param('vel_ctrl')
+                self.isPathPlanned = False
+
+
+    def _get_tf_matrix(self, pose):
+        """Return the homogeneous matrix of given Pose
+        """
+        if isinstance(pose, dict):
+            _quat = np.array([pose['orientation'].x, pose['orientation'].y, pose['orientation'].z, pose['orientation'].w])
+            _trans = np.array([pose['position'].x, pose['position'].y, pose['position'].z])
+            return tr.compose_matrix(angles=tr.euler_from_quaternion(_quat,'sxyz'), translate=_trans)
+        else:
+            _quat = np.array([pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w])
+            _trans = np.array([pose.position.x, pose.position.y, pose.position.z])
+            return tr.compose_matrix(angles=tr.euler_from_quaternion(_quat,'sxyz'), translate=_trans)
+
 
     def get_q_now(self):         # Finds current joint angles
         qtemp = np.zeros(7)
         i = 0
         while i<7:
-            qtemp[i] = self.arm.joint_angle(self.names[i])
+            qtemp[i] = self.limb.joint_angle(self.names[i])
             i += 1
         with self.mutex:
             self.q = qtemp              # Angles in radians
@@ -128,7 +184,6 @@ class VelocityControl(object):
         return
 
     def calc_joint_vel(self):
-
         rospy.logdebug("Calculating joint velocities...")
 
         # Body stuff
@@ -197,7 +252,7 @@ class VelocityControl(object):
         qdot_output = dict(zip(self.names, self.qdot))
 
         # Setting Sawyer right arm joint velocities
-        self.arm.set_joint_velocities(qdot_output)
+        self.limb.set_joint_velocities(qdot_output)
         # print qdot_output
         return
 
@@ -218,18 +273,16 @@ class VelocityControl(object):
         # self.cur_theta_list = np.delete(self.main_js.position, 1)
         Tbs = self.M0 # 
         Blist = self.Blist # 
-
         self.get_q_now()
         with self.mutex:
             q_now = self.q #1x7 mx
         with self.mutex:
-            T_sd = self.T_goal # 
+            # T_sd = self.T_goal # 
+            T_sd = self._get_goal_matrix() # 
             # print T_sd
 
         e = np.dot(r.TransInv(r.FKinBody(Tbs, Blist, q_now)), T_sd) # Modern robotics pp 230 22Nff
-
         Xe = r.se3ToVec(r.MatrixLog6(e))
-
         # self.X_d = self.tf_lis.fromTranslationRotation(self.p_d, self.Q_d)
         # self.X = mr.FKinBody(self.M, self.B_list, self.cur_theta_list)
         # self.X_e = mr.se3ToVec(mr.MatrixLog6(np.dot(mr.TransInv(self.X), self.X_d)))
@@ -251,8 +304,7 @@ class VelocityControl(object):
 
         self.arm.set_joint_velocities(qdot_output)
         # self.stop_oscillating()
-        # print np.linalg.norm(self.int_err)
-        return
+        self._check_traj()
 
 
 def main():

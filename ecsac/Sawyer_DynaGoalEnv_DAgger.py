@@ -7,7 +7,8 @@ import numpy as np
 # import super class
 from Sawyer_DynaGoalEnv_SAC_v0 import robotEnv
 from time import sleep
-# from intera_core_msgs.msg import JointCommand
+from intera_core_msgs.msg import JointCommand
+from geometry_msgs.msg import Pose, Point, Quaternion
 # control modes
 POSITION_MODE=1
 VELOCITY_MODE=2
@@ -22,9 +23,9 @@ class demoEnv(robotEnv):
                         isdagger=isdagger, isPOMDP=isPOMDP, isGripper=isGripper, 
                         isCartesian=isCartesian, train_indicator=train_indicator)
         # define attributes for demo collection
-        rospy.Subscriber('/robot/limb/right/joint_command', JointCommand, self.jointCommandCB)
         self.control_mode = control_mode
         self.control_command = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # j0~j6, gripper on/off 
+        rospy.Subscriber('/robot/limb/right/joint_command', JointCommand, self.jointCommandCB)
 
 
     def jointCommandCB(self, msg):
@@ -54,6 +55,7 @@ class demoEnv(robotEnv):
             des_goal = self._reset_gazebo()
         else:
             des_goal = self._reset_real()
+            
         _joint_pos, _joint_vels, _joint_effos = self.get_joints_states()
         _color_obs = self.get_color_observation()
         _targ_obj_obs = self.get_target_obj_obs()
@@ -67,6 +69,7 @@ class demoEnv(robotEnv):
             obs['full_state'].append(_ee_pose)
         if self.isPOMDP:
             obs['color_obs'] = _color_obs
+        rospy.set_param('vel_calc','true')
         return {'observation': obs,'desired_goal':des_goal, 'auxiliary':_targ_obj_obs}
 
 
@@ -90,12 +93,12 @@ class demoEnv(robotEnv):
         self.control_command[-1] = float(1)
 
 
-    def step_demo(self, action=None):
+    def step_demo(self, action=None, time_step=1000):
         """Step the environment for demo collection episodes.
             :param action:
             :return: obs, reward, done
         """
-        if is not None:
+        if action is not None:
             sleep(POLICY_INFER_TIME)            
         # below for step
         self.prev_tic = self.tic
@@ -149,3 +152,16 @@ class demoEnv(robotEnv):
             goal_obs['color_obs'] = _color_obs
         return {'observation': obs,'achieved_goal':goal_obs, 'auxiliary':_targ_obj_obs}, self.reward_rescale*self.reward, self.done
 
+
+    def reach_target_obj_vel_demo(self, target_pose):
+        """ Servo the robot to reach target object with velocity controller.
+        TODO: check the necessaity of making another thread.
+        """
+        _target_pose = target_pose
+        rospy.set_param('vel_calc','true')
+        self.servo_vel(_target_pose)
+
+
+    def _stop_vel_controller(self):
+        """ Stop the velocity controller for servoing the robot.
+        """
