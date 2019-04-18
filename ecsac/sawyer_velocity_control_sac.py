@@ -1,17 +1,5 @@
 #!/usr/bin/env python
-#-----------------------------------------------------------------------
-# Stripped down version of velocity_controller.py
-# Runs at 100Hz
-#
-# Tasks:
-# 1. Finds Jb and Vb
-# 2. Uses naive least-squares damping to find qdot
-#   (Addresses inf vel at singularities)
-# 3. Publishes qdot to Sawyer using the limb interface
-#
-# Written By Stephanie L. Chang
-# Last Updated: 4/13/17
-#-----------------------------------------------------------------------
+
 # Python Imports
 import numpy as np
 from math import pow, pi, sqrt
@@ -32,13 +20,17 @@ from intera_core_msgs.msg import EndpointState
 import sawyer_MR_description as s
 import modern_robotics as r
 import custom_logging as cl
+import time
 
 ####################
 # GLOBAL VARIABLES #
 ####################
 TIME_LIMIT = 7    #15s
-DAMPING = 0.06
+DAMPING = 0.002 # mimimize
 JOINT_VEL_LIMIT = 2    #2rad/s
+
+CUBIC = 3
+QUINTIC = 5
 
 class VelocityControl(object):
     def __init__(self):
@@ -48,8 +40,8 @@ class VelocityControl(object):
         with cl.suppress_stdout_stderr():    # Eliminates urdf tag warnings
             self.robot = URDF.from_parameter_server()
 
-        # self.kin = KDLKinematics(self.robot, "base", "right_gripper")
-        self.kin= KDLKinematics(self.robot, "base", "right_gripper_tip")
+        self.kin = KDLKinematics(self.robot, "base", "right_gripper") # kinematics to custom joint frame
+        # self.kin= KDLKinematics(self.robot, "base", "right_gripper_tip")
 
         self.names = self.kin.get_joint_names()
 
@@ -58,10 +50,20 @@ class VelocityControl(object):
         # Grab M0 and Blist from saywer_MR_description.py
         self.M0 = s.M #Zero config of right_hand
         self.Blist = s.Blist #6x7 screw axes mx of right arm
-        self.Kp = 50*np.eye(6)
-        self.Ki = 0.0*np.eye(6)
+        self.Kp = 100.0*np.eye(6)
+        self.Ki = 5.0*np.eye(6)
+        self.Kd = 0.1*np.eye(6) # add D-gain
         self.it_count = 0
         self.int_err = 0
+        self.der_err = 0
+        self.int_anti_windup = 20
+
+        self.rate = 100
+        self.sample_time = 1/self.rate
+        self.current_time = time.time()
+        self.last_time = self.current_time
+        self.last_error = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # error in cartesian space
+
         # Shared variables
         self.mutex = threading.Lock()
         self.time_limit = rospy.get_param("~time_limit", TIME_LIMIT)
@@ -75,6 +77,7 @@ class VelocityControl(object):
         self.isCalcOK = False
         self.isPathPlanned = False
         self.traj_err_bound = float(1e-2) # in meter
+        self.plan_time = 7 # in sec. can this be random variable?
         # Subscriber
         self.ee_position = [0.0, 0.0, 0.0]
         self.ee_orientation = [0.0, 0.0, 0.0, 0.0]
@@ -88,7 +91,7 @@ class VelocityControl(object):
         self.cur_wp_idx = int(0) # [0:num_wp - 1]
         self.traj_list = [None for _ in range(self.num_wp)]
 
-        self.r = rospy.Rate(100)
+        self.r = rospy.Rate(self.rate)
         # control loop
         while not rospy.is_shutdown():
             if rospy.has_param('vel_calc'):
@@ -106,9 +109,11 @@ class VelocityControl(object):
         goal_tmp = tr.compose_matrix(angles=tr.euler_from_quaternion(quat, 'sxyz'), translate=p) # frame is spatial 'sxyz', return Euler angle from quaternion for specified axis sequence.
         with self.mutex:
             self.original_goal = goal_tmp
+        print (self.original_goal)
 
 
-    def endpoint_poseCB(self, ee_pose):
+    def endpoint_poseCB(self, state):
+        ee_pose = state.pose
         self.ee_position = [ee_pose.position.x, ee_pose.position.y, ee_pose.position.z]
         self.ee_orientation = [ee_pose.orientation.x, ee_pose.orientation.y, ee_pose.orientation.z, ee_pose.orientation.w]
 
@@ -121,13 +126,24 @@ class VelocityControl(object):
         return self.traj_list[self.cur_wp_idx]
 
 
-    def path_planning(self, num_wp=self.num_wp):
+    def path_planning(self):
         """ Generate desriable waypoints for achieving target pose.
+            - Example
+            dt = 0.01
+            #Create a trajectory to follow
+            thetaend = [pi / 2, pi, 1.5 * pi]
+            Tf = 1
+            N = Tf / dt
+            method = 5
+            dt = Tf / (N - 1.0)
         """
-        current_pose = self._limb.endpoint_pose()
+        dt = self.rate
+        current_pose = self.limb.endpoint_pose()
         X_current = self._get_tf_matrix(current_pose)
         X_goal = self.original_goal
-        self.traj_list = mr.CartesianTrajectory(X_current, X_goal, Tf=5, N=num_wp, method=3)
+        Tf = self.plan_time
+        N = int(Tf/dt)
+        self.traj_list = r.CartesianTrajectory(X_current, X_goal, Tf=Tf, N=N, method=CUBIC)
         # self.T_goal = self.traj_list[self.cur_wp_idx] # set T_goal as the starting waypoint (robot's current pose)
         self.isPathPlanned = True
 
@@ -136,8 +152,8 @@ class VelocityControl(object):
         """Check if the end-effector has reached the desired position of target waypoint.
         """
         _ee_position = self._get_ee_position()
-        _targ_wp_position = tf.translation_from_matrix(self.traj_list[self.cur_wp_idx])
-        if np.linal.norm( np.array(_ee_position) -_targ_wp_position) <= self.traj_err_bound:
+        _targ_wp_position = tr.translation_from_matrix(self.traj_list[self.cur_wp_idx])
+        if np.linalg.norm( np.array(_ee_position) -_targ_wp_position) <= self.traj_err_bound:
             rospy.loginfo('reached waypoint %d', self.cur_wp_idx)
             if self.cur_wp_idx < self.num_wp - 1: # indicate next waypoint
                 self.cur_wp_idx += 1
@@ -169,6 +185,7 @@ class VelocityControl(object):
         with self.mutex:
             self.q = qtemp              # Angles in radians
 
+
     def stop_oscillating(self):
         i = 0
         v_norm = 0
@@ -182,6 +199,7 @@ class VelocityControl(object):
         if v_norm < 0.1:
             self.qdot = np.zeros(7)
         return
+
 
     def calc_joint_vel(self):
         rospy.logdebug("Calculating joint velocities...")
@@ -198,7 +216,8 @@ class VelocityControl(object):
         # Desired config: base to desired - Tbd
         with self.mutex:
             T_sd = self.T_goal # 
-
+        self.current_time = time.time()
+        delta_time = self.current_time - self.last_time
         # Find transform from current pose to desired pose, error
         # refer to CH04 >> the product of exponential formula for open-chain manipulator
         # sequence:
@@ -225,24 +244,19 @@ class VelocityControl(object):
         #   5. JacobianBody:
         #           # In: Blist, and q_now >> Out : T IN SE(3) representing the end-effector frame when the joints are
         #                 at the specified coordinates
-
-
         e = np.dot(r.TransInv(r.FKinBody(Tbs, Blist, q_now)), T_sd) # Modern robotics pp 230 22Nff
-
         # Desired TWIST: MatrixLog6 SE(3) -> se(3) exp coord
         Vb = r.se3ToVec(r.MatrixLog6(e))  # shape : (6,)
         # Construct BODY JACOBIAN for current config
         Jb = r.JacobianBody(Blist, q_now) #6x7 mx # shape (6,7)
         # WE NEED POSITION FEEDBACK CONTROLLER
-
         # Desired ang vel - Eq 5 from Chiaverini & Siciliano, 1994
         # Managing singularities: naive least-squares damping
         n = Jb.shape[-1] #Size of last row, n = 7 joints
         # OR WE CAN USE NUMPY' PINV METHOD 
 
         invterm = np.linalg.inv(np.dot(Jb.T, Jb) + pow(self.damping, 2)*np.eye(n)) # 
-        
-        
+         
         
         qdot_new = np.dot(np.dot(invterm,Jb.T),Vb) # It seems little bit akward...? >>Eq 6.7 on pp 233 of MR book
 
@@ -256,6 +270,7 @@ class VelocityControl(object):
         # print qdot_output
         return
 
+
     def scale_joint_vel(self, q_dot):
         minus_v = abs(np.amin(q_dot))
         plus_v = abs(np.amax(q_dot))
@@ -266,6 +281,13 @@ class VelocityControl(object):
         if scale > self.joint_vel_limit:
             return 1.0*(q_dot/scale)*self.joint_vel_limit
 
+
+    def get_dt(self):
+        """ Returns the delta_T for recursive function calls
+        """
+        self.current_time = time.time()
+        return self.current_time - self.last_time
+         
 
     def calc_joint_vel_2(self):
         # self.it_count += 1
@@ -280,17 +302,21 @@ class VelocityControl(object):
             # T_sd = self.T_goal # 
             T_sd = self._get_goal_matrix() # 
             # print T_sd
+        dT = self.get_dt()
 
         e = np.dot(r.TransInv(r.FKinBody(Tbs, Blist, q_now)), T_sd) # Modern robotics pp 230 22Nff
-        Xe = r.se3ToVec(r.MatrixLog6(e))
-        # self.X_d = self.tf_lis.fromTranslationRotation(self.p_d, self.Q_d)
-        # self.X = mr.FKinBody(self.M, self.B_list, self.cur_theta_list)
-        # self.X_e = mr.se3ToVec(mr.MatrixLog6(np.dot(mr.TransInv(self.X), self.X_d)))
-        if np.linalg.norm(self.int_err) < 10 and np.linalg.norm(self.int_err) > -10:
-            # self.int_err = (self.int_err + self.X_e)
-            self.int_err = (self.int_err + Xe)
+        # get Error vector.
+        Xe = r.se3ToVec(r.MatrixLog6(e)) # shape -> [1, 2, 3, 4, 5, 6]
+        dXe = Xe - self.last_error
 
-        Vb = np.dot(self.Kp, Xe) + np.dot(self.Ki, self.int_err)
+        # numerical integration of the error
+        if np.linalg.norm(self.int_err) < self.int_anti_windup:
+            self.int_err += Xe * dT
+        # numerical differentiation of the error
+        if dT > 0:
+            self.der_err = dXe / dT
+
+        Vb = np.dot(self.Kp, Xe) + np.dot(self.Ki, self.int_err) + np.dot(self.Kd, self.der_err) # Kp*Xe + Ki*intg(Xe) + Kd*(dXe/dt)
 
         # self.V_b = np.dot(self.Kp, self.X_e) + np.dot(self.Ki, self.int_err)
         self.J_b = r.JacobianBody(Blist, self.q)
@@ -299,11 +325,14 @@ class VelocityControl(object):
         invterm = np.linalg.inv(np.dot(self.J_b.T, self.J_b) + pow(self.damping, 2)*np.eye(n)) # 
 
         self.q_dot = np.dot(np.dot(invterm, self.J_b.T),Vb) # It seems little bit akward...? >>Eq 6.7 on pp 233 of MR book
+        # add feed-forward term
+
+
         self.q_dot = self.scale_joint_vel(self.q_dot)
         qdot_output = dict(zip(self.names, self.q_dot))
-
-        self.arm.set_joint_velocities(qdot_output)
+        self.limb.set_joint_velocities(qdot_output)
         # self.stop_oscillating()
+        self.last_error = Xe
         self._check_traj()
 
 
