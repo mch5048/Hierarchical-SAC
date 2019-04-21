@@ -89,8 +89,8 @@ from intera_core_msgs.srv import (
     SolvePositionIKRequest,
 )
 
-from .gazebo_connection import GazeboConnection
-from .controllers_connection import ControllersConnection
+from gazebo_connection import GazeboConnection
+from controllers_connection import ControllersConnection
 
 
 overhead_orientation = Quaternion(
@@ -165,7 +165,7 @@ class robotEnv():
         self.block_pose = Pose()
         # joint command publisher
         self.jointCmdPub = rospy.Publisher('/robot/limb/right/joint_command', JointCommand, tcp_nodelay=True, queue_size=1)
-        self.demo_target_pub = rospy.Publisher('/demo/target/', Pose)
+        self.demo_target_pub = rospy.Publisher('/demo/target/', Pose, queue_size=1)
         self.resize_factor = 100/400.0
         self.resize_factor_real = 100/400.0
         self.tf_listenser = tf.TransformListener()
@@ -198,6 +198,8 @@ class robotEnv():
         if train_indicator:
             rospy.on_shutdown(self._delete_gazebo_models)
 
+        # goal related
+        self._hover_distance = 0.30
         # sawyer_viz_pose = Pose(position=Point(x=0.75, y=0.0, z=0.0))
         # model_path = rospkg.RosPack().get_path('ddpg')+"/sdf/"
         # sawyer_xml = ""
@@ -308,7 +310,7 @@ class robotEnv():
         """
         if self.isReal:
             try:
-                (self.endpt_ori, self.endpt_pos) = self.tf_listenser.lookupTransform('/base','/right_gripper_tip', rospy.Time(0))
+                (self.endpt_pos, self.endpt_ori) = self.tf_listenser.lookupTransform('/base','/right_gripper_tip', rospy.Time(0))
             except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
                 pass
         else:
@@ -477,6 +479,23 @@ class robotEnv():
         return b_pose 
 
 
+    def retract(self):
+        """retract after grasping&releasing target object
+        """
+        current_pose = self._limb.endpoint_pose()
+        ik_pose = Pose()
+        ik_pose.position.x = current_pose['position'].x
+        ik_pose.position.y = current_pose['position'].y
+        ik_pose.position.z = current_pose['position'].z + self._hover_distance
+        ik_pose.orientation.x = current_pose['orientation'].x
+        ik_pose.orientation.y = current_pose['orientation'].y
+        ik_pose.orientation.z = current_pose['orientation'].z
+        ik_pose.orientation.w = current_pose['orientation'].w
+        self._servo_to_pose(ik_pose)
+        print ('=============== retracting... ===============')
+        rospy.sleep(1.0)
+
+
     def _reset_gazebo(self):
         """ Initialize the robot to its random pose.
             1. load target block with its random pose
@@ -497,9 +516,10 @@ class robotEnv():
         starting_joint_angles['right_j2'], starting_joint_angles['right_j3'],
         starting_joint_angles['right_j4'], starting_joint_angles['right_j5'],
         starting_joint_angles['right_j6']]
+        rospy.sleep(0.5)
+        self.gripper_open()
         _ = self.move_to_start(starting_joint_angles)
         print("Moving the right arm to start pose...")
-        self.gripper_open()
         return _des_goal
 
 
@@ -525,6 +545,7 @@ class robotEnv():
         starting_joint_angles['right_j2'], starting_joint_angles['right_j3'],
         starting_joint_angles['right_j4'], starting_joint_angles['right_j5'],
         starting_joint_angles['right_j6']]
+        self.retract()
         # _ = self.move_to_start_vel_command(start_pose)
         _ = self.move_to_start(starting_joint_angles)
         print("Moving the right arm to start pose...")

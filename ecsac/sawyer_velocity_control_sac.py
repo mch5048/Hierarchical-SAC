@@ -22,11 +22,17 @@ import modern_robotics as r
 import custom_logging as cl
 import time
 
+from gazebo_msgs.srv import (
+    SetModelState,
+    GetModelState,
+    SpawnModel,
+    DeleteModel,
+)
 ####################
 # GLOBAL VARIABLES #
 ####################
 TIME_LIMIT = 7    #15s
-DAMPING = 0.002 # mimimize
+DAMPING = 0.02 # mimimize
 JOINT_VEL_LIMIT = 2    #2rad/s
 
 CUBIC = 3
@@ -40,26 +46,28 @@ class VelocityControl(object):
         with cl.suppress_stdout_stderr():    # Eliminates urdf tag warnings
             self.robot = URDF.from_parameter_server()
 
-        self.kin = KDLKinematics(self.robot, "base", "right_gripper") # kinematics to custom joint frame
-        # self.kin= KDLKinematics(self.robot, "base", "right_gripper_tip")
+        # self.kin = KDLKinematics(self.robot, "base", "right_gripper") # kinematics to custom joint frame
+        self.kin= KDLKinematics(self.robot, "base", "right_gripper_tip")
 
         self.names = self.kin.get_joint_names()
 
+        if rospy.has_param('vel_calc'):
+            rospy.delete_param('vel_calc')
         self.limb = intera_interface.Limb("right")
         self.gripper = intera_interface.gripper.Gripper('right')
         # Grab M0 and Blist from saywer_MR_description.py
         self.M0 = s.M #Zero config of right_hand
         self.Blist = s.Blist #6x7 screw axes mx of right arm
-        self.Kp = 100.0*np.eye(6)
-        self.Ki = 5.0*np.eye(6)
-        self.Kd = 0.1*np.eye(6) # add D-gain
+        self.Kp = 1000.0*np.eye(6)
+        self.Ki = 0.0*np.eye(6)
+        self.Kd = 100.0*np.eye(6) # add D-gain
         self.it_count = 0
         self.int_err = 0
         self.der_err = 0
-        self.int_anti_windup = 20
+        self.int_anti_windup = 10
 
-        self.rate = 100
-        self.sample_time = 1/self.rate
+        self.rate = 100.0
+        self.sample_time = 1.0/self.rate
         self.current_time = time.time()
         self.last_time = self.current_time
         self.last_error = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # error in cartesian space
@@ -72,22 +80,28 @@ class VelocityControl(object):
         self.q = np.zeros(7)        # Joint angles
         self.qdot = np.zeros(7)     # Joint velocities
         self.T_goal = np.array(self.kin.forward(self.q))    # Ref se3
-        self.original_goal = self.T_goal.copy()    # Ref se3
-        # print self.T_goal
+        # robot @ its original pose : position (0.3161, 0.1597, 1.151) , orientation (0.337, 0.621, 0.338, 0.621)
+        self.original_goal = self.T_goal.copy() # robot @ its home pose : 
+        print ('Verifying initial pose...')
+        print (self.T_goal)
         self.isCalcOK = False
         self.isPathPlanned = False
         self.traj_err_bound = float(1e-2) # in meter
-        self.plan_time = 7 # in sec. can this be random variable?
+        self.plan_time = 5 # in sec. can this be random variable?
+        self.rand_plan_min = 5.0
+        self.rand_plan_max = 9.0
         # Subscriber
         self.ee_position = [0.0, 0.0, 0.0]
         self.ee_orientation = [0.0, 0.0, 0.0, 0.0]
+        self.ee_lin_twist = [0.0, 0.0, 0.0]
+        self.ee_ang_twist = [0.0, 0.0, 0.0]
 
         rospy.Subscriber('/demo/target/', Pose, self.ref_poseCB)
         rospy.Subscriber('/robot/limb/right/endpoint_state', EndpointState , self.endpoint_poseCB)
 
         self.gripper.calibrate()
         # path planning
-        self.num_wp = int(5)
+        self.num_wp = int(0)
         self.cur_wp_idx = int(0) # [0:num_wp - 1]
         self.traj_list = [None for _ in range(self.num_wp)]
 
@@ -109,13 +123,18 @@ class VelocityControl(object):
         goal_tmp = tr.compose_matrix(angles=tr.euler_from_quaternion(quat, 'sxyz'), translate=p) # frame is spatial 'sxyz', return Euler angle from quaternion for specified axis sequence.
         with self.mutex:
             self.original_goal = goal_tmp
-        print (self.original_goal)
 
 
     def endpoint_poseCB(self, state):
+        """ receives end-effectors' pose and twists for feedback-purpose
+        """
         ee_pose = state.pose
+        ee_twist = state.twist
+
         self.ee_position = [ee_pose.position.x, ee_pose.position.y, ee_pose.position.z]
         self.ee_orientation = [ee_pose.orientation.x, ee_pose.orientation.y, ee_pose.orientation.z, ee_pose.orientation.w]
+        self.ee_lin_twist = [ee_twist.linear.x, ee_twist.linear.y, ee_twist.linear.z]
+        self.ee_ang_twist = [ee_twist.angular.x, ee_twist.angular.y, ee_twist.angular.z]
 
 
     def _get_ee_position(self):
@@ -123,6 +142,7 @@ class VelocityControl(object):
 
 
     def _get_goal_matrix(self):
+        print (self.traj_list[self.cur_wp_idx])
         return self.traj_list[self.cur_wp_idx]
 
 
@@ -137,30 +157,48 @@ class VelocityControl(object):
             method = 5
             dt = Tf / (N - 1.0)
         """
-        dt = self.rate
+        dt = self.sample_time
         current_pose = self.limb.endpoint_pose()
+
         X_current = self._get_tf_matrix(current_pose)
         X_goal = self.original_goal
-        Tf = self.plan_time
-        N = int(Tf/dt)
+        X_goal[2][3] += 0.05
+        rospy.logwarn('=============== Current pose ===============')
+        print (X_current)
+        rospy.logwarn('=============== Goal goal ===============')
+        print (X_goal)
+        # Tf = self.plan_time
+        Tf = np.random.uniform(self.rand_plan_min, self.rand_plan_max)
+        N = int(Tf / dt) # ex: plantime = 7, dt = 0.01 -> N = 700
+        self.num_wp = N
         self.traj_list = r.CartesianTrajectory(X_current, X_goal, Tf=Tf, N=N, method=CUBIC)
-        # self.T_goal = self.traj_list[self.cur_wp_idx] # set T_goal as the starting waypoint (robot's current pose)
         self.isPathPlanned = True
-
+        self._get_target_pose()
 
     def _check_traj(self):
         """Check if the end-effector has reached the desired position of target waypoint.
         """
         _ee_position = self._get_ee_position()
         _targ_wp_position = tr.translation_from_matrix(self.traj_list[self.cur_wp_idx])
-        if np.linalg.norm( np.array(_ee_position) -_targ_wp_position) <= self.traj_err_bound:
-            rospy.loginfo('reached waypoint %d', self.cur_wp_idx)
-            if self.cur_wp_idx < self.num_wp - 1: # indicate next waypoint
-                self.cur_wp_idx += 1
-            elif self.cur_wp_idx == self.num_wp - 1: # robot has reached the last waypoint
-                self.cur_wp_idx = 0
-                rospy.delete_param('vel_ctrl')
-                self.isPathPlanned = False
+        # if np.linalg.norm( np.array(_ee_position) -_targ_wp_position) <= self.traj_err_bound:
+        if self.cur_wp_idx < self.num_wp - 1: # indicate next waypoint
+            self.cur_wp_idx += 1
+        elif self.cur_wp_idx == self.num_wp - 1: # robot has reached the last waypoint
+            # rospy.logwarn('Reached target object')
+            self.cur_wp_idx = 0
+            rospy.delete_param('vel_calc')
+            self.isPathPlanned = False
+
+
+    def _get_target_pose(self):
+        rospy.wait_for_service('/gazebo/get_model_state')
+        try:
+            object_state_srv = rospy.ServiceProxy('/gazebo/get_model_state', GetModelState)
+            # object_state = object_state_srv("block", "world")
+            object_state = object_state_srv("block", "base")
+            print ([object_state.pose.position.x, object_state.pose.position.y, object_state.pose.position.z])
+        except rospy.ServiceException as e:
+            rospy.logerr("Spawn URDF service call failed: {0}".format(e)) 
 
 
     def _get_tf_matrix(self, pose):
@@ -280,6 +318,8 @@ class VelocityControl(object):
             scale = plus_v
         if scale > self.joint_vel_limit:
             return 1.0*(q_dot/scale)*self.joint_vel_limit
+        else:
+            return q_dot
 
 
     def get_dt(self):
@@ -288,6 +328,8 @@ class VelocityControl(object):
         self.current_time = time.time()
         return self.current_time - self.last_time
          
+    def get_feed_forward(self):
+        return self.ee_ang_twist + self.ee_lin_twist
 
     def calc_joint_vel_2(self):
         # self.it_count += 1
@@ -303,20 +345,19 @@ class VelocityControl(object):
             T_sd = self._get_goal_matrix() # 
             # print T_sd
         dT = self.get_dt()
-
         e = np.dot(r.TransInv(r.FKinBody(Tbs, Blist, q_now)), T_sd) # Modern robotics pp 230 22Nff
         # get Error vector.
         Xe = r.se3ToVec(r.MatrixLog6(e)) # shape -> [1, 2, 3, 4, 5, 6]
         dXe = Xe - self.last_error
-
         # numerical integration of the error
         if np.linalg.norm(self.int_err) < self.int_anti_windup:
-            self.int_err += Xe * dT
+            self.int_err += Xe # * dT
         # numerical differentiation of the error
         if dT > 0:
             self.der_err = dXe / dT
 
-        Vb = np.dot(self.Kp, Xe) + np.dot(self.Ki, self.int_err) + np.dot(self.Kd, self.der_err) # Kp*Xe + Ki*intg(Xe) + Kd*(dXe/dt)
+        Vb = np.dot(self.Kp, Xe) + np.dot(self.Ki, self.int_err) #+ np.dot(self.Kd, self.der_err) # Kp*Xe + Ki*intg(Xe) + Kd*(dXe/dt)
+        Vb += self.get_feed_forward()
 
         # self.V_b = np.dot(self.Kp, self.X_e) + np.dot(self.Ki, self.int_err)
         self.J_b = r.JacobianBody(Blist, self.q)
@@ -333,6 +374,7 @@ class VelocityControl(object):
         self.limb.set_joint_velocities(qdot_output)
         # self.stop_oscillating()
         self.last_error = Xe
+        self.last_time = self.current_time
         self._check_traj()
 
 

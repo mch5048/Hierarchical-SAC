@@ -6,14 +6,31 @@ import rospkg
 import numpy as np
 # import super class
 from Sawyer_DynaGoalEnv_SAC_v0 import robotEnv
+import time
 from time import sleep
 from intera_core_msgs.msg import JointCommand
 from geometry_msgs.msg import Pose, Point, Quaternion
 # control modes
-POSITION_MODE=1
-VELOCITY_MODE=2
-TORQUE_MODE=3
+POSITION_MODE = 1
+VELOCITY_MODE = 2
+TORQUE_MODE = 3
 POLICY_INFER_TIME = 0.01 # time took for the policy network to infer action (feed forward)
+
+overhead_orientation = Quaternion(
+                            x=-0.00142460053167,
+                            y=0.999994209902,
+                            z=-0.00177030764765,
+                            w=0.00253311793936)
+ACTION_DIM = 8 # Cartesian
+OBS_DIM = (100,100,3)      # POMDP
+STATE_DIM = 24        # MDP
+GRIPPER_UPPER = 0.041667
+GRIPPER_LOWER = 0.0
+
+TERM_THRES = 50
+SUC_THRES = 50
+
+
 
 class demoEnv(robotEnv): 
     def __init__(self, max_steps=700, control_mode='velocity', isdagger=False, isPOMDP=False, isGripper=False, isCartesian=True, train_indicator=1):
@@ -26,7 +43,8 @@ class demoEnv(robotEnv):
         self.control_mode = control_mode
         self.control_command = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # j0~j6, gripper on/off 
         rospy.Subscriber('/robot/limb/right/joint_command', JointCommand, self.jointCommandCB)
-
+        if rospy.has_param('vel_calc'):
+            rospy.delete_param('vel_calc')
 
     def jointCommandCB(self, msg):
         """POSITION_MODE=1
@@ -35,11 +53,14 @@ class demoEnv(robotEnv):
            the last element is binary (gripper on-off)
         """
         if self.control_mode=='velocity' or msg.mode==VELOCITY_MODE:
-            self.control_command[:-1] = msg.velocity
+            if len(msg.velocity)==ACTION_DIM-1:
+                self.control_command[:-1] = msg.velocity
         elif self.control_mode=='position' or msg.mode==POSITION_MODE:
-            self.control_command[:-1] = msg.position
+            if len(msg.position)==ACTION_DIM-1:
+                self.control_command[:-1] = msg.position
         elif self.control_mode=='torque' or msg.mode==TORQUE_MODE:
-            self.control_command[:-1] = msg.position
+            if len(msg.effort)==ACTION_DIM-1:
+                self.control_command[:-1] = msg.effort
         else:
             raise NotImplementedError
 
@@ -50,6 +71,8 @@ class demoEnv(robotEnv):
         """
         # Desired goal is given here.
         # Should wait until reset finishes.
+        if rospy.has_param('vel_calc'):
+            rospy.delete_param('vel_calc')
         self.control_command[-1] = float(0)
         if not self.isReal: # for simulated env.
             des_goal = self._reset_gazebo()
