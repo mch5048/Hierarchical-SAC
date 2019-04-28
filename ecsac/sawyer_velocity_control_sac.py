@@ -134,6 +134,7 @@ class VelocityControl(object):
         self.print_kdl_chain()
         self.prev_frame = PyKDL.Frame() # initialize as identity frame
         self.init_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
+        self.integ_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
 
         # control loop
         while not rospy.is_shutdown():
@@ -532,20 +533,21 @@ class VelocityControl(object):
         # self.stop_oscillating()
         self.last_error = Xe
         self.last_time = self.current_time
-        self._check_traj()
+        self._check_traj(dT)
 
 
     def set_init_frame(self):
         """ Set the frame of the start pose of the trajectory.
         """
         self.init_frame = self.get_current_frame()
+        self.integ_frame = self.init_frame
 
 
     def integ_error(self, twist_err, dT):
         """Apply timestep-wise error integration.
         """
-        PyKDL.addDelta(self.init_frame, twist_err, dT)
-        return PyKDL.diff(self.init_frame, self.cur_frame, self.traj_elapse)
+        self.integ_frame = PyKDL.addDelta(self.integ_frame, twist_err, dT)
+        return PyKDL.diff(self.init_frame, self.integ_frame, self.traj_elapse)
 
 
     def apply_gain(self, prop_err, integ_err):
