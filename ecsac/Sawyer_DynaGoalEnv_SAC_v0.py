@@ -23,6 +23,7 @@ from geometry_msgs.msg import (
     Point,
     Quaternion,
 )
+
 from gazebo_msgs.srv import (
     SetModelState,
     GetModelState,
@@ -30,6 +31,15 @@ from gazebo_msgs.srv import (
     DeleteModel,
 )
 
+from intera_core_msgs.srv import (
+    SolvePositionFK,
+    SolvePositionFKRequest,
+    SolvePositionIK,
+    SolvePositionIKRequest,
+)
+
+
+from controllers_connection import ControllersConnection
 import modern_robotics as mr
 import tf
 
@@ -91,7 +101,6 @@ from intera_core_msgs.srv import (
 
 from gazebo_connection import GazeboConnection
 from controllers_connection import ControllersConnection
-
 
 overhead_orientation = Quaternion(
                             x=-0.00142460053167,
@@ -199,23 +208,10 @@ class robotEnv():
             rospy.on_shutdown(self._delete_gazebo_models)
 
         # goal related
-        self._hover_distance = 0.30
-        # sawyer_viz_pose = Pose(position=Point(x=0.75, y=0.0, z=0.0))
-        # model_path = rospkg.RosPack().get_path('ddpg')+"/sdf/"
-        # sawyer_xml = ""
-        # with open (model_path + "sawyer.sdf", "r") as sawyer_file:
-        #     sawyer_xml=sawyer_file.read().replace('\n', '')
-        # # Spawn Table SDF
-        # rospy.wait_for_service('/gazebo/spawn_sdf_model')
-        # try:
-        #     spawn_sdf = rospy.ServiceProxy('/gazebo/spawn_sdf_model', SpawnModel)
-        #     resp_sdf1 = spawn_sdf("sawyer_viz", sawyer_xml, "/",
-        #                         sawyer_viz_pose, 'world')
-        # except rospy.ServiceException, e:
-        #     rospy.logerr("Spawn SDF service call failed: {0}".format(e))
-
-
-
+        self._hover_distance = 0.1
+        # self.controller_connection = ControllersConnection(namespace='robot',
+        #  controllers_list=['right_joint_position_controller', 'right_joint_velocity_controller', 'right_joint_effort_controller'])
+      
 
     def move_to_start(self, start_angles=None):
         print("Moving the {0} arm to start pose...".format('right'))
@@ -512,13 +508,18 @@ class robotEnv():
         starting_joint_angles['right_j2'] = np.random.uniform(-0.1, 0.1)
         starting_joint_angles['right_j3'] = np.random.uniform(1.6, 1.7)
 
-        start_pose = [starting_joint_angles['right_j0'], starting_joint_angles['right_j1'],
+        _start_angles = [starting_joint_angles['right_j0'], starting_joint_angles['right_j1'],
         starting_joint_angles['right_j2'], starting_joint_angles['right_j3'],
         starting_joint_angles['right_j4'], starting_joint_angles['right_j5'],
         starting_joint_angles['right_j6']]
-        rospy.sleep(0.5)
+        self._limb.set_joint_position_speed(1.0)
         self.gripper_open()
+        self.retract()
         _ = self.move_to_start(starting_joint_angles)
+        # rospy.set_param('vel_calc', 'start')
+        # while not rospy.is_shutdown() and rospy.has_param('vel_calc'):
+        #     print ('Pending...')
+        #     pass
         print("Moving the right arm to start pose...")
         return _des_goal
 
@@ -545,7 +546,6 @@ class robotEnv():
         starting_joint_angles['right_j2'], starting_joint_angles['right_j3'],
         starting_joint_angles['right_j4'], starting_joint_angles['right_j5'],
         starting_joint_angles['right_j6']]
-        self.retract()
         # _ = self.move_to_start_vel_command(start_pose)
         _ = self.move_to_start(starting_joint_angles)
         print("Moving the right arm to start pose...")
@@ -679,19 +679,22 @@ class robotEnv():
             TODO: Use Sawyer velocity controller class 
         """
         # random position // quaterion from RPY
-        _ori_x = np.random.uniform(3.05,3.20)
-        _ori_y = np.random.uniform(-0.35,0.45)
-        _ori_z = np.random.uniform(-0.1,0.1)
-        if _ori_x >= pi:
-            _ori_x -=2*pi
-        _rot = PyKDL.Rotation.RPY(_ori_x, _ori_y, _ori_z)
-        quat = _rot.GetQuaternion() # -> x, y, z, w
-        start_pose = goal_pose
-        start_pose.position.z += 0.00
-        start_pose.orientation = overhead_orientation
+        # _ori_x = np.random.uniform(3.05,3.20)
+        # _ori_y = np.random.uniform(-0.35,0.45)
+        # _ori_z = np.random.uniform(-0.1,0.1)
+        # if _ori_x >= pi:
+        #     _ori_x -=2*pi
+        # _rot = PyKDL.Rotation.RPY(_ori_x, _ori_y, _ori_z)
+        # quat = _rot.GetQuaternion() # -> x, y, z, w
+        _start_pose = goal_pose
+        _start_pose.position.z += 0.00
+        _start_pose.orientation = overhead_orientation
         self.gripper_open()
-        self._servo_to_pose(start_pose)
+        self._servo_to_pose(_start_pose)
         self._load_table()
+        rospy.logwarn('======================================================')
+        print ('block pose', block_pose)
+        rospy.logwarn('======================================================')
         self.demo_target_pub.publish(block_pose) # publish target pose for velocity controller
         self._load_target_block(block_pose=block_pose) 
         rospy.sleep(1.0)
@@ -974,3 +977,41 @@ class robotEnv():
 
     def close(self):        
         rospy.signal_shutdown("done")
+
+
+    def fk_service_client(self, joint_pose, limb = "right"):
+        # returned value contains PoseStanped
+        # std_msgs/Header header
+        # geometry_msgs/Pose pose
+        ns = "ExternalTools/" + limb + "/PositionKinematicsNode/FKService"
+        fksvc = rospy.ServiceProxy(ns, SolvePositionFK)
+        fkreq = SolvePositionFKRequest()
+        joints = JointState()
+        joints.name = ['right_j0', 'right_j1', 'right_j2', 'right_j3',
+                         'right_j4', 'right_j5', 'right_j6']
+
+        joints.position = joint_pose
+          # Add desired pose for forward kinematics
+        fkreq.configuration.append(joints)
+          # Request forward kinematics from base to "right_hand" link
+        # fkreq.tip_names.append('right_hand')
+        fkreq.tip_names.append('right_gripper_tip')
+
+        try:
+            rospy.wait_for_service(ns, 5.0)
+            resp = fksvc(fkreq)
+        except (rospy.ServiceException, rospy.ROSException), e:
+            rospy.logerr("Service call failed: %s" % (e,))
+            return False
+
+          # Check if result valid
+        if (resp.isValid[0]):
+            # rospy.loginfo("SUCCESS - Valid Cartesian Solution Found")
+            # rospy.loginfo("\nFK Cartesian Solution:\n")
+            # rospy.loginfo("------------------")
+            # rospy.loginfo("Response Message:\n%s", resp)
+              # print resp.pose_stamp[0].pose
+            return resp.pose_stamp[0].pose
+        else:
+            # rospy.logerr("INVALID JOINTS - No Cartesian Solution Found.")
+            return False

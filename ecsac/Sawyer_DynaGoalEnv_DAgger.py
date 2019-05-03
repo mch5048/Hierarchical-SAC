@@ -122,7 +122,7 @@ class demoEnv(robotEnv):
             :return: obs, reward, done
         """
         if action is not None:
-            sleep(POLICY_INFER_TIME)            
+            rospy.sleep(POLICY_INFER_TIME)            
         # below for step
         self.prev_tic = self.tic
         self.tic = time.time()

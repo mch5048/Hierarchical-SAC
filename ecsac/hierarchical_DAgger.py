@@ -100,8 +100,10 @@ class DemoReplayBuffer(object):
     def return_buffer(self):
         """ Returns the whole numpy arrays containing demo transitions.
         """
-        return {'data':[self.obs_buf, self.obs1_buf, self.g_buf, self.g1_buf, self.stt_buf, self.stt1_buf,
-                self.act_buf, self.rews_buf, self.done_buf, self.aux_buf, self.aux1_buf],
+        return {'data':[self.obs_buf[:self.ptr], self.obs1_buf[:self.ptr], self.g_buf[:self.ptr], 
+                        self.g1_buf[:self.ptr], self.stt_buf[:self.ptr], self.stt1_buf[:self.ptr],
+                        self.act_buf[:self.ptr], self.rews_buf[:self.ptr], self.done_buf[:self.ptr],
+                        self.aux_buf[:self.ptr], self.aux1_buf[:self.ptr]],
                 'size':self.size}
 
 
@@ -138,9 +140,11 @@ class DemoManagerReplayBuffer(DemoReplayBuffer):
     def return_buffer(self):
         """ Returns the whole numpy arrays containing demo transitions, for manager transitions
         """
-        return {'data':[self.obs_buf, self.obs1_buf, self.g_buf, self.g1_buf, self.stt_buf, self.stt1_buf,
-                self.act_buf, self.rews_buf, self.done_buf, self.aux_buf, self.aux1_buf],
-                'seq_data':[self.stt_seq_buf, self.obs_seq_buf, self.act_seq_buf],
+        return {'data':[self.obs_buf[:self.ptr], self.obs1_buf[:self.ptr], self.g_buf[:self.ptr],
+                        self.g1_buf[:self.ptr], self.stt_buf[:self.ptr], self.stt1_buf[:self.ptr],
+                        self.act_buf[:self.ptr], self.rews_buf[:self.ptr], self.done_buf[:self.ptr],
+                        self.aux_buf[:self.ptr], self.aux1_buf[:self.ptr]],
+                'seq_data':[self.stt_seq_buf[:self.ptr], self.obs_seq_buf[:self.ptr], self.act_seq_buf[:self.ptr]],
                 'size':self.size}
 
 
@@ -150,21 +154,27 @@ def normalize(x, stats):
     return (x - stats.mean) / stats.std
 
 
-def normalize_action(action_arr):
-    lb_array = ACTION_LOW_BOUND*np.ones(action_arr.shape)
-    hb_array = ACTION_HIGH_BOUND*np.ones(action_arr.shape)
-    _norm_action = lb_array + (action_arr+1.0*np.ones(action_arr.shape))*0.5*(hb_array - lb_array)
-    _norm_action = np.clip(_norm_action, lb_array, hb_array)
-    _norm_action = _norm_action.reshape(action_arr.shape)
-    return _norm_action
+# def normalize_action(action_arr):
+#     lb_array = ACTION_LOW_BOUND*np.ones(action_arr.shape)
+#     hb_array = ACTION_HIGH_BOUND*np.ones(action_arr.shape)
+#     _norm_action = lb_array + (action_arr+1.0*np.ones(action_arr.shape))*0.5*(hb_array - lb_array)
+#     _norm_action = np.clip(_norm_action, lb_array, hb_array)
+#     _norm_action = _norm_action.reshape(action_arr.shape)
+#     return _norm_action
 
 
 def randomize_world():
-    rospy.wait_for_service('/dynamic_world_service')
+    """ Domain randomization for the environment's light and the color of robot link.
+    """
+    rospy.wait_for_service('/dynamic_world_service') # randomize the light in the gazebo world
     dynamic_world_service_call = rospy.ServiceProxy('/dynamic_world_service', Empty)
     change_env_request = EmptyRequest()
     dynamic_world_service_call(change_env_request)
 
+    # rospy.wait_for_service('/colorize_world_service') # randomize the model colors in the gazebo world
+    # colorize_world_service_call = rospy.ServiceProxy('/colorize_world_service', Empty)
+    # colorize_env_request = EmptyRequest()
+    # colorize_world_service_call(colorize_env_request)
 
 if __name__ == '__main__':
 
@@ -201,10 +211,10 @@ if __name__ == '__main__':
     # rospy.init_node('hierarchical_DAgger')
 
     # demo quantity related
-    total_epi = 50
-    max_ep_len = 1000
+    total_epi = 1
+    max_ep_len = 500
     total_steps = total_epi * max_ep_len
-    buffer_size = int(5e4) # 50000 steps : is it enough?
+    buffer_size = int(1e4) # 50000 steps : is it enough?
     manager_propose_freq = 10
 
     isDemo = True
@@ -447,11 +457,21 @@ if __name__ == '__main__':
     # if all the demo episodes have ended.
 
     os.chdir(demo_path)
+    if os.path.exists('demo_manager_buffer.bin'):
+        print ('Deletes the manger buffer')
+        rospy.logwarn('=======================================================')
+        os.remove("demo_manager_buffer.bin")
+    if os.path.exists('demo_controller_buffer.bin'):
+        print ('Deletes the controller buffer')
+        os.remove("demo_controller_buffer.bin")
+        rospy.logwarn('=======================================================')
+
     print ('Now saves the manager buffer in pickle format')
     with open ('demo_manager_buffer.bin', 'wb') as f:             
-        pickle.dump(manager_buffer, f)
+        pickle.dump(manager_buffer.return_buffer(), f)
     print ('Now saves the controller buffer in pickle format')
-    with open ('demo_manager_buffer.bin', 'wb') as f:             
-        pickle.dump(controller_buffer, f)
+    with open ('demo_controller_buffer.bin', 'wb') as f2:             
+        pickle.dump(controller_buffer.return_buffer(), f2)
 
 
+                                                                                                                                
