@@ -23,6 +23,7 @@ from geometry_msgs.msg import (
     Point,
     Quaternion,
 )
+
 from gazebo_msgs.srv import (
     SetModelState,
     GetModelState,
@@ -30,6 +31,15 @@ from gazebo_msgs.srv import (
     DeleteModel,
 )
 
+from intera_core_msgs.srv import (
+    SolvePositionFK,
+    SolvePositionFKRequest,
+    SolvePositionIK,
+    SolvePositionIKRequest,
+)
+
+
+from controllers_connection import ControllersConnection
 import modern_robotics as mr
 import tf
 
@@ -88,6 +98,9 @@ from intera_core_msgs.srv import (
     SolvePositionIK,
     SolvePositionIKRequest,
 )
+
+from gazebo_connection import GazeboConnection
+from controllers_connection import ControllersConnection
 
 overhead_orientation = Quaternion(
                             x=-0.00142460053167,
@@ -153,20 +166,18 @@ class robotEnv():
         self.reward_type = 'sparse'
         self.destPos = np.array([0.5, 0.0, 0.0])
         self.joint_cmd_msg = JointCommand()
-
-
         if self.isGripper:
             global STATE_DIM
             STATE_DIM +=2 # add dimenstion for gripper joints
             
         # variable for random block pose
         self.block_pose = Pose()
-
         # joint command publisher
         self.jointCmdPub = rospy.Publisher('/robot/limb/right/joint_command', JointCommand, tcp_nodelay=True, queue_size=1)
-        self.ikVelPub = rospy.Publisher('/teacher/ik_vel/', Pose, tcp_nodelay=True, queue_size=3)
+        self.demo_target_pub = rospy.Publisher('/demo/target/', Pose, queue_size=1)
         self.resize_factor = 100/400.0
         self.resize_factor_real = 100/400.0
+        self.tf_listenser = tf.TransformListener()
 
         rospy.Subscriber('/robot/joint_states', JointState , self.jointStateCB)
         rospy.Subscriber('/robot/limb/right/endpoint_state', EndpointState , self.endpoint_positionCB)
@@ -174,8 +185,6 @@ class robotEnv():
             rospy.Subscriber("/camera/color/image_raw", Image, self.rgb_ImgCB)
         else:
             rospy.Subscriber("/dynamic_objects/camera/raw_image", Image, self.rgb_ImgCB)
-
-
         self.distance_threshold = 0.05 # threshold for episode success
         self.tic = 0.0
         self.toc = 0.0
@@ -189,14 +198,20 @@ class robotEnv():
         if rospy.has_param('vel_calc'):
             rospy.delete_param('vel_calc')
         self.init_robot_pose()
-        self._load_gazebo_models()
-        self.tf_listenser = tf.TransformListener()
+        if train_indicator:
+            self._load_gazebo_models()
         self.ee_trans = list()
         self.ee_rot = list()
         self.termination_count = 0
         self.success_count = 0
-        rospy.on_shutdown(self._delete_gazebo_models)
+        if train_indicator:
+            rospy.on_shutdown(self._delete_gazebo_models)
 
+        # goal related
+        self._hover_distance = 0.1
+        # self.controller_connection = ControllersConnection(namespace='robot',
+        #  controllers_list=['right_joint_position_controller', 'right_joint_velocity_controller', 'right_joint_effort_controller'])
+      
 
     def move_to_start(self, start_angles=None):
         print("Moving the {0} arm to start pose...".format('right'))
@@ -205,6 +220,7 @@ class robotEnv():
         self._guarded_move_to_joint_position(start_angles)
         self.gripper_open()
 
+
     def _guarded_move_to_joint_position(self, joint_angles, timeout=5.0):
         if rospy.is_shutdown():
             return
@@ -212,6 +228,7 @@ class robotEnv():
             self._limb.move_to_joint_positions(joint_angles,timeout=timeout)
         else:
             rospy.logerr("No Joint Angles provided for move_to_joint_positions. Staying put.")
+
 
     def init_robot_pose(self):
         starting_joint_angles['right_j0'] = np.random.uniform(-0.05, 0.05)
@@ -223,8 +240,8 @@ class robotEnv():
         starting_joint_angles['right_j2'], starting_joint_angles['right_j3'],
         starting_joint_angles['right_j4'], starting_joint_angles['right_j5'],
         starting_joint_angles['right_j6']]
-
         self.move_to_start(starting_joint_angles)
+
 
     def observation_space(self):
         """
@@ -239,11 +256,13 @@ class robotEnv():
             shape=self.get_observation().shape,
             dtype=np.float32)
 
+
     def rgb_ImgCB(self, data):
         self.rcvd_color = data  ## ROS default image
         self.cimg_tstmp = rospy.get_time()
         self.color_image = self.bridge.imgmsg_to_cv2(self.rcvd_color, "bgr8") # 640 * 480
     
+
     def jointStateCB(self,msg): # callback function for joint state readings
         
         self.joint_positions = [self._limb.joint_angle('right_j0'),
@@ -287,7 +306,7 @@ class robotEnv():
         """
         if self.isReal:
             try:
-                (self.endpt_ori, self.endpt_pos) = self.tf_listenser.lookupTransform('/base','/right_gripper_tip', rospy.Time(0))
+                (self.endpt_pos, self.endpt_ori) = self.tf_listenser.lookupTransform('/base','/right_gripper_tip', rospy.Time(0))
             except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
                 pass
         else:
@@ -295,15 +314,19 @@ class robotEnv():
             self.endpt_ori = [_endpt_pose.orientation.x, _endpt_pose.orientation.y, _endpt_pose.orientation.z, _endpt_pose.orientation.w]
             self.endpt_pos = [_endpt_pose.position.x, _endpt_pose.position.y, _endpt_pose.position.z]
 
+
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
 
+
     def get_gripper_position(self):
         return self.gripper.get_position()
 
+
     def get_joints_states(self):
         return self.joint_positions, self.joint_velocities, self.joint_efforts
+
 
     def get_color_observation(self):
         if self.isReal:
@@ -311,11 +334,10 @@ class robotEnv():
         else:
             return cv2.resize(self.color_image, None, fx=self.resize_factor, fy=self.resize_factor, interpolation=cv2.INTER_CUBIC)
 
+
     def get_end_effector_pose(self):
-        if not self.isReal:
-            return self.endpt_ori + self.endpt_pos
-        else:
-            return self.ee_rot + self.ee_trrans
+        return self.endpt_ori + self.endpt_pos
+
 
     def get_target_obj_obs(self):
         """Return target object pose. Experimentally supports only position info."""
@@ -333,6 +355,7 @@ class robotEnv():
     def set_gripper_position(self, pos):
         self.gripper.set_position(pos)
 
+
     def set_action(self, joint_commands=list(), gripper_command=None):
         self.joint_commands = joint_commands
         self.joint_cmd_msg.mode = 2
@@ -340,8 +363,11 @@ class robotEnv():
         self.joint_cmd_msg.velocity = self.joint_commands # dtype should be list()
         self.jointCmdPub.publish(self.joint_cmd_msg)
         self._limb.set_command_timeout(1.0)
+        if int(gripper_command)==1 and self._get_dist() <= self.distance_threshold:
+            self.gripper_close()
+        elif self._get_dist() <= self.distance_threshold:
+            self.gripper_open()
 
-        # self.set_gripper_position(gripper_command)
 
     def test_servo_vel(self, time_step):
         dynamic_pose = self.dynamic_object(step=time_step)
@@ -352,16 +378,17 @@ class robotEnv():
             rospy.logwarn('Initialized pose.')
             rospy.delete_param('vel_calc')
 
+
     def step(self, action=None, time_step=0):#overriden function
         """
         Function executed each time step.
         Here we get the action execute it in a time step and retrieve the
-        observations generated by that action.
+        observations generated by that action.self.reward
         :param action:
         :return: obs, reward, done
         """
         # self.test_servo_vel(time_step)
-        # self.set_gripper_position(np.random.uniform(0.0,0.041))
+        # self.set_gripper_position(np.random.self.rewardniform(0.0,0.041))
         self.prev_tic = self.tic
         self.tic = time.time()
         self.elapsed =  time.time()-self.prev_tic
@@ -372,8 +399,8 @@ class robotEnv():
         # act = action.flatten().tolist()
         act = action
         self.set_action(joint_commands=act[:-1],gripper_command=act[-1])
-        curDist = self._get_dist()
         if not self.isReal:
+            curDist = self._get_dist()
             self.reward = self._compute_reward()
             if self.reward==1.0:
                 self.success_count +=1
@@ -393,9 +420,7 @@ class robotEnv():
         _targ_obj_obs = self.get_target_obj_obs()
         _gripper_pos = self.get_gripper_position()
         _ee_pose =  self.get_end_effector_pose()
-
-        # obj_pos = self._get_target_obj_obs() # TODO: implement this function call.                        
-
+        # obj_pos = self._get_target_obj_obs() # TODO: implement this function call.                  
         if np.mod(time_step, 10)==0:
             if not self.isReal:
                 print("DISTANCE : ", curDist)
@@ -418,10 +443,9 @@ class robotEnv():
         if self.isPOMDP:
             obs['color_obs'] = _color_obs
             goal_obs['color_obs'] = _color_obs
-
         return {'observation': obs,'achieved_goal':goal_obs, 'auxiliary':_targ_obj_obs}, self.reward_rescale*self.reward, self.done
 
-    # Gazebo related methods.
+
     def get_desired_goals(self):
         """ how to acquire desired goal observation in real robot test environment?
         """
@@ -441,13 +465,32 @@ class robotEnv():
             des_goal['color_obs'] = _color_obs
         return des_goal
 
+
     def gen_block_pose(self):
         b_pose =Pose()
         b_pose.position.x = np.random.uniform(0.45, .75)
         b_pose.position.y = np.random.uniform(-0.2, 0.33)
-        b_pose.position.z = 0.00
+        b_pose.position.z = 0.00    
         b_pose.orientation = overhead_orientation
         return b_pose 
+
+
+    def retract(self):
+        """retract after grasping&releasing target object
+        """
+        current_pose = self._limb.endpoint_pose()
+        ik_pose = Pose()
+        ik_pose.position.x = current_pose['position'].x
+        ik_pose.position.y = current_pose['position'].y
+        ik_pose.position.z = current_pose['position'].z + self._hover_distance
+        ik_pose.orientation.x = current_pose['orientation'].x
+        ik_pose.orientation.y = current_pose['orientation'].y
+        ik_pose.orientation.z = current_pose['orientation'].z
+        ik_pose.orientation.w = current_pose['orientation'].w
+        self._servo_to_pose(ik_pose)
+        print ('=============== retracting... ===============')
+        rospy.sleep(1.0)
+
 
     def _reset_gazebo(self):
         """ Initialize the robot to its random pose.
@@ -458,11 +501,6 @@ class robotEnv():
         block_pose = self.gen_block_pose()
         self._delete_target_block()
         self._delete_table()
-        # object_state_srv = rospy.ServiceProxy('/gazebo/get_model_state', GetModelState)
-        # # object_state = object_state_srv("block", "world")
-        # object_state = object_state_srv("block", "base")
-        # self._obj_pose = np.array([object_state.pose.position.x, object_state.pose.position.y, object_state.pose.position.z])       
-        # print object_state.pose.position.z
         _des_goal = self._reset_desired_goal(goal_pose=block_pose, block_pose=block_pose)
 
         starting_joint_angles['right_j0'] = np.random.uniform(-0.05, 0.05)
@@ -470,17 +508,50 @@ class robotEnv():
         starting_joint_angles['right_j2'] = np.random.uniform(-0.1, 0.1)
         starting_joint_angles['right_j3'] = np.random.uniform(1.6, 1.7)
 
+        _start_angles = [starting_joint_angles['right_j0'], starting_joint_angles['right_j1'],
+        starting_joint_angles['right_j2'], starting_joint_angles['right_j3'],
+        starting_joint_angles['right_j4'], starting_joint_angles['right_j5'],
+        starting_joint_angles['right_j6']]
+        self._limb.set_joint_position_speed(1.0)
+        self.gripper_open()
+        self.retract()
+        _ = self.move_to_start(starting_joint_angles)
+        # rospy.set_param('vel_calc', 'start')
+        # while not rospy.is_shutdown() and rospy.has_param('vel_calc'):
+        #     print ('Pending...')
+        #     pass
+        print("Moving the right arm to start pose...")
+        return _des_goal
+
+
+    def _reset_real(self):
+        """ 
+            Reset the real-world env.
+            Initialize the robot to its random pose.
+            1. load target block with its random pose
+            2. servo the robot to the position (TODO: orientation?)
+            3. the target object should be grippeds when observing desired goals
+        """
+        block_pose = self.gen_block_pose()
+        print ('block_pose', block_pose)
+        print ('PLEASE LOCATE THE BLOCK AT DESIRABLE LOCATION.')
+        self._servo_to_pose(block_pose)
+        self.gripper_close()
+        _des_goal = self.get_desired_goals()
+        starting_joint_angles['right_j0'] = np.random.uniform(-0.05, 0.05)
+        starting_joint_angles['right_j1'] = np.random.uniform(-1.05, -0.85)
+        starting_joint_angles['right_j2'] = np.random.uniform(-0.1, 0.1)
+        starting_joint_angles['right_j3'] = np.random.uniform(1.6, 1.7)
         start_pose = [starting_joint_angles['right_j0'], starting_joint_angles['right_j1'],
         starting_joint_angles['right_j2'], starting_joint_angles['right_j3'],
         starting_joint_angles['right_j4'], starting_joint_angles['right_j5'],
         starting_joint_angles['right_j6']]
-
         # _ = self.move_to_start_vel_command(start_pose)
         _ = self.move_to_start(starting_joint_angles)
         print("Moving the right arm to start pose...")
         self.gripper_open()
-
         return _des_goal
+
 
     def _guarded_move_to_joint_position(self, joint_angles, timeout=5.0):
         if rospy.is_shutdown():
@@ -489,6 +560,7 @@ class robotEnv():
             self._limb.move_to_joint_positions(joint_angles,timeout=timeout)
         else:
             rospy.logerr("No Joint Angles provided for move_to_joint_positions. Staying put.")        
+
 
     def fk_service_client(self, joint_pose, limb = "right"):
         # returned value contains PoseStanped
@@ -509,7 +581,6 @@ class robotEnv():
           # Request forward kinematics from base to "right_hand" link
           # fkreq.tip_names.append('right_hand')
           fkreq.tip_names.append('right_gripper_tip')
-
           try:
               rospy.wait_for_service(ns, 5.0)
               resp = fksvc(fkreq)
@@ -529,34 +600,14 @@ class robotEnv():
               rospy.logerr("INVALID JOINTS - No Cartesian Solution Found.")
               return False
 
-    def move_to_start_vel_command(self, joint_pose):
-        
-        _joint_pose = joint_pose
-        '''
-          1. execute FK (joint pose -> ee pose) for start pose of robot
-          2. get Cartesian pose of the robot
-          3. 
-        '''
-        _pose = self.fk_service_client(_joint_pose)
-
-        rospy.set_param('vel_calc','true')
-        self.servo_vel(_pose)
-        if rospy.has_param('vel_calc'):
-            rospy.logwarn('Initialized pose.')
-            rospy.delete_param('vel_calc')
-        return False
-
-    # def move_to_start(self, joint_pose):
-
-
 
     def gripper_open(self):
         self.gripper.open()
-        rospy.sleep(1.0)
+
 
     def gripper_close(self):
         self.gripper.close()
-        rospy.sleep(1.0)
+
 
     def _get_tf_matrix(self, pose):
         if isinstance(pose, dict):
@@ -568,12 +619,13 @@ class robotEnv():
             _trans = np.array([pose.position.x, pose.position.y, pose.position.z])
             return tr.compose_matrix(angles=tr.euler_from_quaternion(_quat,'sxyz'), translate=_trans)
 
+
     def _get_msg(self, tf_mat):
         _kdl_fr = pm.fromMatrix(tf_mat)
         _msg = pm.toMsg(_kdl_fr)
-        # _quat = _kdl_fr.M.GetQuaternion() # x, y, z, w
-        # _tr = _kdl_fr.p # x, y, z, w
+
         return _msg
+
 
     def _get_pose(self, quat, trans):
         pose = Pose()
@@ -586,6 +638,7 @@ class robotEnv():
         pose.orientation.w = quat[3]
         return pose
     
+
     def _check_traj(self, _pose, idx):
         if _pose: # if Forward Kinematics solution exists
             r = rospy.Rate(100) # command for 30Hz
@@ -602,58 +655,52 @@ class robotEnv():
                     break
                 r.sleep()
 
+
     def servo_vel(self, pose, time=4.0, steps=400, num_wp=5):
         """Servo the robot to the goal
             TODO: merge check_path_stop method
         """
         current_pose = self._limb.endpoint_pose()
-
         X_current = self._get_tf_matrix(current_pose)
         X_goal = self._get_tf_matrix(pose)
 
-        # list of 
+
         traj = mr.CartesianTrajectory(X_current, X_goal, Tf=5, N=num_wp, method=3)
 
         for idx, X in enumerate(traj):
-            print (X)
             _pose = self._get_msg(X)
             self.ikVelPub.publish(_pose)
             self._check_traj(_pose, idx)
+
 
     def _reset_desired_goal(self, goal_pose=Pose(), block_pose=Pose()):
         """Manipulate the robot to the randomly generated target object.
             the orientation of the e,e, should be varied while satisfying the position.
             TODO: Use Sawyer velocity controller class 
         """
-        rospy.set_param('vel_calc', 'true') # start the velocity controller
         # random position // quaterion from RPY
-        _ori_x = np.random.uniform(3.05,3.20)
-        _ori_y = np.random.uniform(-0.35,0.45)
-        _ori_z = np.random.uniform(-0.1,0.1)
-        if _ori_x >= pi:
-            _ori_x -=2*pi
-        _rot = PyKDL.Rotation.RPY(_ori_x, _ori_y, _ori_z)
-        quat = _rot.GetQuaternion() # -> x, y, z, w
-
-        start_pose = goal_pose
-        start_pose.position.z += 0.00
-        start_pose.orientation = overhead_orientation
-        # start_pose.orientation.x = quat[0]
-        # start_pose.orientation.y = quat[1]
-        # start_pose.orientation.z = quat[2]
-        # start_pose.orientation.w = quat[3]
-        
-        # self.servo_vel(start_pose)
-        self._servo_to_pose(start_pose)
-
+        # _ori_x = np.random.uniform(3.05,3.20)
+        # _ori_y = np.random.uniform(-0.35,0.45)
+        # _ori_z = np.random.uniform(-0.1,0.1)
+        # if _ori_x >= pi:
+        #     _ori_x -=2*pi
+        # _rot = PyKDL.Rotation.RPY(_ori_x, _ori_y, _ori_z)
+        # quat = _rot.GetQuaternion() # -> x, y, z, w
+        _start_pose = goal_pose
+        _start_pose.position.z += 0.00
+        _start_pose.orientation = overhead_orientation
+        self.gripper_open()
+        self._servo_to_pose(_start_pose)
         self._load_table()
+        rospy.logwarn('======================================================')
+        print ('block pose', block_pose)
+        rospy.logwarn('======================================================')
+        self.demo_target_pub.publish(block_pose) # publish target pose for velocity controller
         self._load_target_block(block_pose=block_pose) 
-        # if rospy.has_param('vel_calc'):
-        #     rospy.logwarn('Initialized pose.')
-        #     rospy.delete_param('vel_calc')
-        rospy.sleep(0.5)
+        rospy.sleep(1.0)
         self.gripper_close()
         return self.get_desired_goals()
+
 
     def _delete_target_block(self):
         # This will be called on ROS Exit, deleting Gazebo models
@@ -666,6 +713,7 @@ class robotEnv():
         except rospy.ServiceException, e:
             rospy.loginfo("Delete Model service call failed: {0}".format(e))
 
+
     def _delete_table(self):
         # This will be called on ROS Exit, deleting Gazebo models
         # Do not wait for the Gazebo Delete Model service, since
@@ -676,6 +724,7 @@ class robotEnv():
             resp_delete = delete_model("cafe_table")
         except rospy.ServiceException as e:
             print("Delete Model service call failed: {0}".format(e))
+
 
     def _load_table(self):
         # This will be called on ROS Exit, deleting Gazebo models
@@ -690,7 +739,6 @@ class robotEnv():
         table_xml = ''
         with open (model_path + "cafe_table/model.sdf", "r") as table_file:
             table_xml=table_file.read().replace('\n', '')
-
         # Spawn Table SDF
         rospy.wait_for_service('/gazebo/spawn_sdf_model')
         try:
@@ -699,6 +747,7 @@ class robotEnv():
                                 table_pose, table_reference_frame)
         except rospy.ServiceException, e:
             rospy.logerr("Spawn SDF service call failed: {0}".format(e)) 
+
 
     def _delete_gazebo_models(self):
         # This will be called on ROS Exit, deleting Gazebo models
@@ -712,17 +761,19 @@ class robotEnv():
         except rospy.ServiceException as e:
             print("Delete Model service call failed: {0}".format(e))
 
+
     def reset(self):
         # Desired goal is given here.
         # Should wait until reset finishes.
-
-        des_goal = self._reset_gazebo()
+        if not self.isReal: # for simulated env.
+            des_goal = self._reset_gazebo()
+        else:
+            des_goal = self._reset_real()
         _joint_pos, _joint_vels, _joint_effos = self.get_joints_states()
         _color_obs = self.get_color_observation()
         _targ_obj_obs = self.get_target_obj_obs()
         _gripper_pos = self.get_gripper_position()
         _ee_pose = self.get_end_effector_pose()
-
         obs = dict()
         obs['full_state'] = [_joint_pos, _joint_vels, _joint_effos] # default observations
         if self.isGripper:
@@ -731,22 +782,19 @@ class robotEnv():
             obs['full_state'].append(_ee_pose)
         if self.isPOMDP:
             obs['color_obs'] = _color_obs
-
         return {'observation': obs,'desired_goal':des_goal, 'auxiliary':_targ_obj_obs}
+
 
     def _load_target_block(self, block_pose=Pose(position=Point(x=0.6725, y=0.1265, z=0.7825)),
                         block_reference_frame="base"):
         # Get Models' Path
         model_path = rospkg.RosPack().get_path('sawyer_sim_examples')+"/models/"
-        
         # Load Block URDF
         block_xml = ''
-
         num = randint(1,3)
         num = str(num)
         with open (model_path + "block/model_"+num+".urdf", "r") as block_file:
-            block_xml=block_file.read().replace('\n', '')
-        
+            block_xml=block_file.read().replace('\n', '')        
         # Spawn Block URDF
         rospy.wait_for_service('/gazebo/spawn_urdf_model')
         try:
@@ -756,6 +804,7 @@ class robotEnv():
         except rospy.ServiceException as e:
             rospy.logerr("Spawn URDF service call failed: {0}".format(e))
 
+
     def _load_gazebo_models(self, table_pose=Pose(position=Point(x=0.75, y=0.0, z=0.0)),
                         table_reference_frame="world",
                         block_pose=Pose(position=Point(x=0.4225, y=0.1265, z=1.1725)),
@@ -763,10 +812,8 @@ class robotEnv():
                         kinect_pose=Pose(position=Point(x=1.50, y=0.0, z=1.50)),
                         kinect_reference_frame="world"
                         ):
-
         kinect_RPY = PyKDL.Rotation.RPY(0.0, 0.7854, 3.142)
         kinect_quat = kinect_RPY.GetQuaternion()
-
         kinect_pose.position.x = 1.50
         kinect_pose.position.y = 0.0
         kinect_pose.position.z = 1.50
@@ -774,7 +821,6 @@ class robotEnv():
         kinect_pose.orientation.y = kinect_quat[1]
         kinect_pose.orientation.z = kinect_quat[2]
         kinect_pose.orientation.w = kinect_quat[3]
-
         # Get Models' Path
         model_path = rospkg.RosPack().get_path('sawyer_sim_examples')+"/models/"
         # Load Table SDF
@@ -798,6 +844,7 @@ class robotEnv():
         except rospy.ServiceException, e:
             rospy.logerr("Spawn SDF service call failed: {0}".format(e))    
 
+
     def _check_for_termination(self):
         """
         Check if the agent has reached undesirable state. If so, terminate the episode early. 
@@ -809,6 +856,7 @@ class robotEnv():
                 return True
             else:
                 return False    
+
 
     def _check_for_success(self):
         """
@@ -826,6 +874,7 @@ class robotEnv():
         else:
             return False
 
+
     def _compute_reward(self):
         """Computes shaped/sparse reward for each episode.
         """
@@ -835,11 +884,13 @@ class robotEnv():
         else:
             return -cur_dist -self.squared_sum_vel # -L2 distance -l2_norm(joint_vels)
 
+
     def compute_reward_from_goal(self, achieved_goal, desired_goal):
         """Re-computed rewards for substituted goals. Only supports sparse reward setting.
         Computes batch array of rewards"""
         batch_dist = np.linalg.norm(achieved_goal - desired_goal, axis=-1)
         return (batch_dist <= self.distance_threshold).astype(np.float32)
+
 
     def env_goal_transition(self, obs, next_obs, sub_goal):
         """ goal transition based on generic goal representation.
@@ -847,10 +898,12 @@ class robotEnv():
         """
         return obs + sub_goal - next_obs 
 
+
     def compute_intrinsic_reward(self, obs, next_obs, goal):
         """intrinsic reward for the low-level agent. based on the goal_transition
         """
         return -np.linalg.norm(self.env_goal_transition(obs, next_obs, goal))
+
 
     def _get_dist(self):
         rospy.wait_for_service('/gazebo/get_model_state')
@@ -863,6 +916,7 @@ class robotEnv():
             rospy.logerr("Spawn URDF service call failed: {0}".format(e))        
         _ee_pose = np.array(self.endpt_pos) # FK state of robot
         return np.linalg.norm(_ee_pose-self._obj_pose)
+
 
     def dynamic_object(self, pose = Pose(), step=0.0):
         """ dynamical movement of target object
@@ -887,6 +941,7 @@ class robotEnv():
         except Exception as e:            
             rospy.logerr('Error on calling service: %s',str(e))
         return obj_pose
+
 
     def _servo_to_pose(self, pose, time=4.0, steps=400.0):
         ''' An *incredibly simple* linearly-interpolated Cartesian move '''
@@ -920,17 +975,43 @@ class robotEnv():
             r.sleep()
 
 
-
-
-
-
-
-
-
-
     def close(self):        
         rospy.signal_shutdown("done")
 
-    """
-        Methods for HIRO implementation
-    """
+
+    def fk_service_client(self, joint_pose, limb = "right"):
+        # returned value contains PoseStanped
+        # std_msgs/Header header
+        # geometry_msgs/Pose pose
+        ns = "ExternalTools/" + limb + "/PositionKinematicsNode/FKService"
+        fksvc = rospy.ServiceProxy(ns, SolvePositionFK)
+        fkreq = SolvePositionFKRequest()
+        joints = JointState()
+        joints.name = ['right_j0', 'right_j1', 'right_j2', 'right_j3',
+                         'right_j4', 'right_j5', 'right_j6']
+
+        joints.position = joint_pose
+          # Add desired pose for forward kinematics
+        fkreq.configuration.append(joints)
+          # Request forward kinematics from base to "right_hand" link
+        # fkreq.tip_names.append('right_hand')
+        fkreq.tip_names.append('right_gripper_tip')
+
+        try:
+            rospy.wait_for_service(ns, 5.0)
+            resp = fksvc(fkreq)
+        except (rospy.ServiceException, rospy.ROSException), e:
+            rospy.logerr("Service call failed: %s" % (e,))
+            return False
+
+          # Check if result valid
+        if (resp.isValid[0]):
+            # rospy.loginfo("SUCCESS - Valid Cartesian Solution Found")
+            # rospy.loginfo("\nFK Cartesian Solution:\n")
+            # rospy.loginfo("------------------")
+            # rospy.loginfo("Response Message:\n%s", resp)
+              # print resp.pose_stamp[0].pose
+            return resp.pose_stamp[0].pose
+        else:
+            # rospy.logerr("INVALID JOINTS - No Cartesian Solution Found.")
+            return False
