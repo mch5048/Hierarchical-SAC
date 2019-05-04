@@ -28,7 +28,7 @@ from state_action_space import *
 
 from wandb.tensorflow import wandb
 
-wandb.init(project="hierarchical-sac", tensorboard=True)
+
 
 rms_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/'
 log_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/'
@@ -44,8 +44,11 @@ CTRL_QF1_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/ctrl
 CTRL_QF2_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/ctrl_qf2_trained/'
 
 # we exploit off-policy demo data with replay buffer
-DEMO_DIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp'
-DEMO_DATA = 'traj_dagger.bin'
+rms_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_aux/'
+demo_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_aux/'
+home_path = '/home/irobot'
+MAN_BUF_FNAME = 'demo_manager_buffer.bin'
+CON_BUF_FNAME = 'demo_controller_buffer.bin'
 
 # BC_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/sac_exp/bc_pretrain/weights/'
 
@@ -89,10 +92,10 @@ class ReplayBuffer(object):
         self.done_buf[self.ptr] = done
         self.aux_buf[self.ptr] = aux
         self.aux1_buf[self.ptr] = aux
-
         if not manager:
             self.ptr = (self.ptr+1) % self.max_size
             self.size = min(self.size+1, self.max_size)
+
 
     def sample_batch(self, batch_size=32):
         idxs = np.random.randint(0, self.size, size=batch_size)
@@ -109,6 +112,21 @@ class ReplayBuffer(object):
                     aux=self.aux_buf[idxs],
                     aux1=self.aux1_buf[idxs],
                     )
+
+
+    def store_demo_transition(self, demo_batch):
+        """ Store the expert demonstartion trajectory generated from DAgger
+            demo_batch -> Tuple('data', 
+            'size'= > should increase the ptr as this much.)
+        """
+        demo_size = demo_batch['size']
+        self.obs_buf[:demo_size], self.obs1_buf[:demo_size], self.g_buf[:demo_size], \
+        self.g1_buf[:demo_size], self.stt_buf[:demo_size], self.stt1_buf[:demo_size], \
+        self.act_buf[:demo_size], self.rews_buf[:demo_size], self.done_buf[:demo_size], \
+        self.aux_buf[:demo_size], self.aux1_buf[:demo_size] = demo_batch['data']
+        self.ptr = (demo_size + 1) % self.max_size
+        self.size = min(demo_size + 1, self.max_size)
+
 
 class ManagerReplayBuffer(ReplayBuffer):
     """
@@ -159,6 +177,24 @@ class ManagerReplayBuffer(ReplayBuffer):
                     ot_seq=self.obs_seq_buf[idxs],
                     at_seq=self.act_seq_buf[idxs])
 
+
+    def store_demo_transition(self, demo_batch):
+        """ Store the expert demonstartion trajectory generated from DAgger
+            demo_batch -> Tuple('data', 
+            'size'= > should increase the ptr as this much.)
+        """
+        demo_size = demo_batch['size']
+        self.obs_buf[:demo_size], self.obs1_buf[:demo_size], self.g_buf[:demo_size], \
+        self.g1_buf[:demo_size], self.stt_buf[:demo_size], self.stt1_buf[:demo_size], \
+        self.act_buf[:demo_size], self.rews_buf[:demo_size], self.done_buf[:demo_size], \
+        self.aux_buf[:demo_size], self.aux1_buf[:demo_size] = demo_batch['data']
+        
+        # store a batch of sequence demo data
+        self.stt_seq_buf[:demo_size], \
+        self.obs_seq_buf[:demo_size], \
+        self.act_seq_buf[:demo_size] = demo_batch['seq_data']
+        self.ptr = (demo_size + 1) % self.max_size
+        self.size = min(demo_size + 1, self.max_size)
 """
 
 Midified Soft Actor-Critic
@@ -189,6 +225,17 @@ def randomize_world():
 
     dynamic_world_service_call(change_env_request)
 
+def colorize_world():
+
+    # We first wait for the service for RandomEnvironment change to be ready
+    # rospy.loginfo("Waiting for service /dynamic_world_service to be ready...")
+    rospy.wait_for_service('/colorize_world_service')
+    # rospy.loginfo("Service /dynamic_world_service READY")
+    dynamic_world_service_call = rospy.ServiceProxy('/dynamic_world_service', Empty)
+    change_env_request = EmptyRequest()
+
+    dynamic_world_service_call(change_env_request)
+
 
 def normalize(ndarray, stats):
     if stats is None:
@@ -205,44 +252,7 @@ def sample_action(action_dim):
 
     
 def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
-    """
-    Implementation of EC-SAC for Sawyer's reach & grasp
-    Args:
-        env_fn : A function which creates a copy of the environment.
-            The environment must satisfy the OpenAI Gym API.
-
-        actor_critic: A function which takes in placeholder symbols 
-            for state, ``x_ph``, and action, ``a_ph``, and returns the main 
-            outputs from the agent's Tensorflow computation graph:
-
-            ===========  ================  ======================================
-            Symbol       Shape             Description
-            ===========  ================  ======================================
-            ``mu``       (batch, act_dim)  | Computes mean actions from policy
-                                           | given states.
-            ``pi``       (batch, act_dim)  | Samples actions from policy given 
-                                           | states.
-            ``logp_pi``  (batch,)          | Gives log probability, according to
-                                           | the policy, of the action sampled by
-                                           | ``pi``. Critical: must be differentiable
-                                           | with respect to policy parameters all
-                                           | the way through action sampling.
-            ``q1``       (batch,)          | Gives one estimate of Q* for 
-                                           | states in ``x_ph`` and actions in
-                                           | ``a_ph``.
-            ``q2``       (batch,)          | Gives another estimate of Q* for 
-                                           | states in ``x_ph`` and actions in
-                                           | ``a_ph``.
-            ``q1_pi``    (batch,)          | Gives the composition of ``q1`` and 
-                                           | ``pi`` for states in ``x_ph``: 
-                                           | q1(x, pi(x)).
-            ``q2_pi``    (batch,)          | Gives the composition of ``q2`` and 
-                                           | ``pi`` for states in ``x_ph``: 
-                                           | q2(x, pi(x)).
-            ``v``        (batch,)          | Gives the value estimate for states
-                                           | in ``x_ph``. 
-            ===========  ================  ======================================
-    """
+    
     # hiro specific params
     manager_propose_freq = 10
     train_manager_freq= 10
@@ -291,6 +301,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
 
     # wandb
+    os.chdir(demo_path)
+    wandb.init(project="hierarchical-sac", tensorboard=True)
     wandb.config.mananger_propose_freq = manager_propose_freq
     wandb.config.train_manager_freq = train_manager_freq
     wandb.config.manager_noise = manager_noise
@@ -308,6 +320,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     wandb.config.vf_lr = vf_lr 
     wandb.config.alp_lr = alp_lr 
     # model save/load
+    USE_DEMO = True
+    PRETRAIN_MANAGER = True
     DATA_LOAD_STEP = 20000
 
     IS_TRAIN = train_indicator
@@ -655,6 +669,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         controller_ops = train_ops
         _ctrl_buffer = buffer
         for itr in range(ep_len):
+            cur_step = step - ep_len + itr
             batch = _ctrl_buffer.sample_batch(batch_size)
             ctrl_feed_dict = {obs_ph: normalize_observation(c_obs=batch['ot']),
                          obs1_ph: normalize_observation(c_obs=batch['ot1']),
@@ -674,7 +689,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             if itr % 10 == 0:
                 wandb.log({'policy_loss_lo': low_outs[0], 'q1_loss_lo': low_outs[1],
                             'q2_loss_lo': low_outs[2], 'q1_lo': low_outs[3], 
-                            'q2_lo': low_outs[4], 'alpha': low_outs[10], 'global_step': step})
+                            'q2_lo': low_outs[4], 'alpha': low_outs[10], 'global_step': cur_step})
 
         summary_writer.add_summary(low_outs[-3], step) # low-pi summary
         summary_writer.add_summary(low_outs[-2], step) # low-q1 summary
@@ -769,6 +784,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         _man_buffer = buffer
         # execute off-policy correction before training
         for itr in range(ep_len):
+            cur_step = step - int(ep_len * manager_propose_freq) + itr
             batch = _man_buffer.sample_batch(batch_size)
             # subgoal here is the action of manager network, action for computing log-likelihood
             corr_subgoals = off_policy_correction(subgoals= batch['acts'],s_seq= batch['st_seq'],
@@ -791,11 +807,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
             q_hi_outs = sess.run(q_ops+[man_q_summary], man_feed_dict)
 
-            if step % delayed_update_freq ==0: # delayed update of the policy and target nets.
+            if itr % delayed_update_freq ==0: # delayed update of the policy and target nets.
                 pi_hi_outs = sess.run(pi_ops + [man_pi_summary], man_feed_dict)
-                summary_writer.add_summary(pi_hi_outs[-1] , step) # low-pi summary
-            # logging
-                andb.log({'policy_loss_hi': pi_hi_outs[0]})       
+                summary_writer.add_summary(pi_hi_outs[-1] , cur_step) # low-pi summary
+                wandb.log({'policy_loss_hi': pi_hi_outs[0]})       
         wandb.log({'q1_hi': q_hi_outs[0], 'q2_hi': q_hi_outs[1], 'q1_loss_hi': q_hi_outs[2],
                     'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'global_step': step})
         rospy.loginfo('writes summary of high-level value-ftn')
@@ -871,7 +886,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
 
     TRAIN_HIGH_LEVEL = False # DAgger should be reimplemented 
-    
+
+    episode_num = 0
     if TRAIN_HIGH_LEVEL: 
         raise NotImplementedError
         for tr in range(high_pretrain_steps) and not rospy.is_shutdown():
@@ -882,15 +898,23 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             ep_ret = 0 # episode return for the manager
             ep_low_ret = 0 # return of the intrinsic reward for low level controller 
             episode_num += 1 # for every env.reset()
-    
-    
-    
-    
 
-    # how demo transition consists of
-    # obs_t,  stt_t, act_t,   rew_t, obs_t+1, stt_t+1, done
-    # TODO : implement demo acquisition into the buffer
-    # TODO : implement usage of pre-trained network
+    if USE_DEMO:
+        with open(MAN_BUF_FNAME, 'rb') as f:
+            rospy.logwarn('Loading demo batch on the manager buffer. May take a while...')
+            _manager_batch = pickle.load(f)
+            manager_buffer.store_demo_transition(_manager_batch)
+
+        with open(CON_BUF_FNAME, 'rb') as f2:
+            rospy.logwarn('Loading demo batch on the controller buffer. May take a while...')
+            _controller_batch = pickle.load(f2)
+            controller_buffer.store_demo_transition(_controller_batch)
+        rospy.loginfo('Successfully loaded demo transitions on the buffers!')
+
+    if PRETRAIN_MANAGER:
+        train_high_level_manager(train_ops=step_hi_ops, buffer=manager_buffer, ep_len=int(ep_len/train_manager_freq), step=_manager_batch['size'])
+        raise NotImplementedError
+
 
     if noise_type == "normal":
         subgoal_noise = Gaussian(mu=np.zeros(sub_goal_dim), sigma=noise_stddev*np.ones(sub_goal_dim))
@@ -908,7 +932,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     reset = False
     manager_temp_transition = list() # temp manager transition
     if train_indicator: # train
-        saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
+        saver.save(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
     else: # test
         rospy.logwarn('Now loads the pretrained weight for test')
         load_rms()    

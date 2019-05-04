@@ -42,6 +42,8 @@ from std_msgs.msg import Header
 from SetupSummary import SummaryManager_HIRO as SummaryManager
 rms_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_aux/'
 demo_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_aux/'
+MAN_BUF_FNAME = 'demo_manager_buffer.bin'
+CON_BUF_FNAME = 'demo_controller_buffer.bin'
 
 class DemoReplayBuffer(object):
     """
@@ -457,20 +459,23 @@ if __name__ == '__main__':
     # if all the demo episodes have ended.
 
     os.chdir(demo_path)
-    if os.path.exists('demo_manager_buffer.bin'):
+    if os.path.exists(MAN_BUF_FNAME):
         print ('Deletes the manger buffer')
+        ans = bool(input("Delete the manager buffer? 'y'/'n' "))
         rospy.logwarn('=======================================================')
-        os.remove("demo_manager_buffer.bin")
-    if os.path.exists('demo_controller_buffer.bin'):
+        if ans=='y':
+            os.remove(MAN_BUF_FNAME)
+    if os.path.exists(CON_BUF_FNAME):
         print ('Deletes the controller buffer')
-        os.remove("demo_controller_buffer.bin")
+        ans = bool(input("Delete the controller buffer? 'y'/'n' "))
+        os.remove(CON_BUF_FNAME)
         rospy.logwarn('=======================================================')
 
     print ('Now saves the manager buffer in pickle format')
-    with open ('demo_manager_buffer.bin', 'wb') as f:             
+    with open (MAN_BUF_FNAME, 'wb') as f:             
         pickle.dump(manager_buffer.return_buffer(), f)
     print ('Now saves the controller buffer in pickle format')
-    with open ('demo_controller_buffer.bin', 'wb') as f2:             
+    with open (CON_BUF_FNAME, 'wb') as f2:             
         pickle.dump(controller_buffer.return_buffer(), f2)
 
 

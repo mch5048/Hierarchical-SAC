@@ -363,9 +363,9 @@ class robotEnv():
         self.joint_cmd_msg.velocity = self.joint_commands # dtype should be list()
         self.jointCmdPub.publish(self.joint_cmd_msg)
         self._limb.set_command_timeout(1.0)
-        if int(gripper_command)==1:
+        if int(gripper_command)==1 and self._get_dist() <= self.distance_threshold:
             self.gripper_close()
-        else:
+        elif self._get_dist() <= self.distance_threshold:
             self.gripper_open()
 
 
