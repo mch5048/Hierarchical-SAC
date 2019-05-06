@@ -297,7 +297,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
     # encoding ?? -> rather, shouldn't it be LSTM? g 
-    high_pretrain_steps = 10000000 
+    high_pretrain_steps = int(1e6) 
 
 
     # wandb
@@ -787,22 +787,20 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             cur_step = step - int(ep_len * manager_propose_freq) + itr
             batch = _man_buffer.sample_batch(batch_size)
             # subgoal here is the action of manager network, action for computing log-likelihood
-            corr_subgoals = off_policy_correction(subgoals= batch['acts'],s_seq= batch['st_seq'],
             # shape of corr_subgoals (batch_size, goal_dim)
+            corr_subgoals = off_policy_correction(subgoals= batch['acts'],s_seq= batch['st_seq'],
             o_seq= batch['ot_seq'], a_seq= batch['at_seq'])
-            q_ops = train_ops['q_ops'] # {'q_ops': step_hi_q_ops, 'pi_ops':step_hi_pi_ops}
             # action of the manager is subgoal...
             man_feed_dict = {stt_ph: normalize_observation(full_stt=batch['st']),
                             stt1_ph: normalize_observation(full_stt=batch['st1']),
-                            sg_ph: normalize_observation(full_stt=batch['acts']),
+                            sg_ph: normalize_observation(full_stt=corr_subgoals),
                             dg_ph : normalize_observation(full_stt=batch['g']),
                             dg1_ph : normalize_observation(full_stt=batch['g1']),
                             aux_ph : normalize_observation(aux=batch['aux']),
                             aux1_ph : normalize_observation(aux=batch['aux1']),
                             rew_ph_hi: batch['rews'],
                             dn_ph: batch['done'],
-                            }
-                        
+                            }                        
             q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
             pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
             q_hi_outs = sess.run(q_ops+[man_q_summary], man_feed_dict)
@@ -815,6 +813,33 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                     'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'global_step': step})
         rospy.loginfo('writes summary of high-level value-ftn')
         summary_writer.add_summary(q_hi_outs[-1] , step) # low-q summary
+
+    def pretrain_manager(demo_buffer, pretrain_steps, train_ops, batch_size=batch_size):
+        """ Pre-trains the manager actor-critic network with data collected from demonstartions.
+        TODO: check if tensorboard logging is valid here. 
+        """
+        rospy.logwarn("Pre-trains the high-level controller for %d timesteps", pretrain_steps)
+        _demo_buffer = demo_buffer
+        # execute off-policy correction before training
+        for itr in range(pretrain_steps):
+            batch = _demo_buffer.sample_batch(batch_size)
+            # off policy  correction is not required here 
+            # action of the manager is subgoal...
+            man_feed_dict = {
+                            stt_ph : normalize_observation(full_stt=batch['st']),
+                            stt1_ph : normalize_observation(full_stt=batch['st1']),
+                            sg_ph : normalize_observation(full_stt=batch['acts']),
+                            dg_ph : normalize_observation(full_stt=batch['g']),
+                            dg1_ph : normalize_observation(full_stt=batch['g1']),
+                            aux_ph : normalize_observation(aux=batch['aux']),
+                            aux1_ph : normalize_observation(aux=batch['aux1']),
+                            rew_ph_hi: batch['rews'],
+                            dn_ph : batch['done'],}                                                    
+            q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
+            pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
+            _ = sess.run(q_ops, man_feed_dict)
+            if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
+                _ = sess.run(pi_ops, man_feed_dict)
 
     def normalize_observation(full_stt=None, c_obs=None, aux=None, act=None):
         """ normalizes observations for each step based on running mean-std.
@@ -870,6 +895,19 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         summary_manager.s_t5_rms.load_mean_std(rms_path+'mean_std5.bin')
         summary_manager.s_t6_rms.load_mean_std(rms_path+'mean_std6.bin')
         summary_manager.a_t_rms.load_mean_std(rms_path+'mean_std7.bin')
+
+    def load_demo_rms():
+        """ Loads the mean-stddev of the demonstration batch data
+        """
+        rospy.logwarn('Loads the mean and stddev for test time')
+        summary_manager.s_t0_rms.load_mean_std(rms_path+'mean_std0_demo.bin')
+        summary_manager.s_t1_rms.load_mean_std(rms_path+'mean_std1_demo.bin')
+        summary_manager.s_t2_rms.load_mean_std(rms_path+'mean_std2_demo.bin')
+        summary_manager.s_t3_rms.load_mean_std(rms_path+'mean_std3_demo.bin')
+        summary_manager.s_t4_rms.load_mean_std(rms_path+'mean_std4_demo.bin')
+        summary_manager.s_t5_rms.load_mean_std(rms_path+'mean_std5_demo.bin')
+        summary_manager.s_t6_rms.load_mean_std(rms_path+'mean_std6_demo.bin')
+        summary_manager.a_t_rms.load_mean_std(rms_path+'mean_std7_demo.bin')
     
     def save_rms(step):
         rospy.logwarn('Saves the mean and stddev @ step %d', step)
@@ -909,12 +947,11 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             rospy.logwarn('Loading demo batch on the controller buffer. May take a while...')
             _controller_batch = pickle.load(f2)
             controller_buffer.store_demo_transition(_controller_batch)
+        load_demo_rms()
         rospy.loginfo('Successfully loaded demo transitions on the buffers!')
 
     if PRETRAIN_MANAGER:
-        train_high_level_manager(train_ops=step_hi_ops, buffer=manager_buffer, ep_len=int(ep_len/train_manager_freq), step=_manager_batch['size'])
-        raise NotImplementedError
-
+        pretrain_manager(demo_buffer=manager_buffer, pretrain_steps=high_pretrain_steps, train_ops=step_hi_ops)
 
     if noise_type == "normal":
         subgoal_noise = Gaussian(mu=np.zeros(sub_goal_dim), sigma=noise_stddev*np.ones(sub_goal_dim))
