@@ -133,12 +133,13 @@ class demoEnv(robotEnv):
         if not self.isReal:
             curDist = self._get_dist()
             self.reward = self._compute_reward()
-            if self.reward==1.0:
+            if self.reward == 1.0:
                 self.success_count +=1
                 if self.success_count == SUC_THRES:
                     print ('======================================================')
                     print ('Succeeds current Episode : SUCCEEDED')
                     print ('======================================================')
+                    self.success_count = 0
                     self.done = True
             if self._check_for_termination():
                 print ('======================================================')

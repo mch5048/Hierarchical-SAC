@@ -185,7 +185,7 @@ class robotEnv():
             rospy.Subscriber("/camera/color/image_raw", Image, self.rgb_ImgCB)
         else:
             rospy.Subscriber("/dynamic_objects/camera/raw_image", Image, self.rgb_ImgCB)
-        self.distance_threshold = 0.05 # threshold for episode success
+        self.distance_threshold = 0.10 # threshold for episode success
         self.tic = 0.0
         self.toc = 0.0
         self.elapsed = 0.0  
@@ -408,6 +408,7 @@ class robotEnv():
                     print ('======================================================')
                     print ('Succeeds current Episode : SUCCEEDED')
                     print ('======================================================')
+                    self.success_count = 0
                     self.done = True
             if self._check_for_termination():
                 print ('======================================================')
@@ -856,23 +857,6 @@ class robotEnv():
                 return True
             else:
                 return False    
-
-
-    def _check_for_success(self):
-        """
-        Check if the agent has reached undesirable state. If so, terminate the episode early. 
-        """
-        curDist = self.getDist()
-        # curDist = 1
-        # print self.successCount
-        if curDist < self.distance_threshold/1.0:
-            self.successCount +=1
-            self.reward +=10
-        if self.successCount == 400:
-            self.successCount =0
-            return True
-        else:
-            return False
 
 
     def _compute_reward(self):

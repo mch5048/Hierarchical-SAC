@@ -215,7 +215,7 @@ if __name__ == '__main__':
     # rospy.init_node('hierarchical_DAgger')
 
     # demo quantity related
-    total_epi = 50
+    total_epi = 20
     max_ep_len = 500
     total_steps = total_epi * max_ep_len
     buffer_size = int(5e4) # 50000 steps : is it enough?

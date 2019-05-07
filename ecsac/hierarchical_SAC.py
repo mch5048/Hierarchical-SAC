@@ -25,7 +25,7 @@ from OU import OU
 from Gaussian import Gaussian
 from collections import OrderedDict
 from state_action_space import *
-
+from tqdm import tqdm
 from wandb.tensorflow import wandb
 
 
@@ -297,8 +297,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
     # encoding ?? -> rather, shouldn't it be LSTM? g 
-    high_pretrain_steps = int(1e6) 
-
+    high_pretrain_steps = int(5E4) 
+    high_pretrain_save_freq = int(1e4)
 
     # wandb
     os.chdir(demo_path)
@@ -589,7 +589,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         norm_action = np.clip(action, low, high)
         return norm_action
 
-
     def normalize_subgoal(action, space, batch_size=1, issubgoal=True):
         """ relocate and rescale the aciton of manager policy (subgoal) to desirable values.    
             subgoal_policy = tensor of shape (1, 29(full_stt + ee + gripper) )
@@ -617,12 +616,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             norm_action = np.clip(action, low, high)
         return norm_action
 
-
     def reloc_rescale_gripper(gripper):
         """ relocate & rescale action to the desirable gripper 
         """
         return 0.02*gripper + 0.022
-
 
     def get_action(obs, sub_goal, deterministic=False): # True for test
         """ infer primitive action from low-level policy
@@ -636,7 +633,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         return np.squeeze(sess.run(act_op, feed_dict={obs_ph: obs,
                                            sg_ph: sub_goal}))
 
-
     def get_subgoal(state, des_goal):
         """ infer subgoal from high-level policy for every freq.
         The output of the higher-level actor net is scaled to an approximated range of high-level acitons.
@@ -647,7 +643,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         des_goal = normalize_observation(full_stt=des_goal.copy().reshape((-1,des_goal_dim)))
         return np.squeeze(sess.run(mu_hi, feed_dict={stt_ph: state,    
                                           dg_ph: des_goal}))
-
 
     def train_low_level_controller(train_ops, buffer, ep_len=max_ep_len, batch_size=batch_size, discount=gamma, polyak=polyak, step=0):
         """ train low-level actor-critic for each episode's timesteps
@@ -668,7 +663,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         rospy.logwarn("Now trains the low-level controller for %d timesteps", ep_len)
         controller_ops = train_ops
         _ctrl_buffer = buffer
-        for itr in range(ep_len):
+        for itr in tqdm(range(ep_len)):
             cur_step = step - ep_len + itr
             batch = _ctrl_buffer.sample_batch(batch_size)
             ctrl_feed_dict = {obs_ph: normalize_observation(c_obs=batch['ot']),
@@ -694,7 +689,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         summary_writer.add_summary(low_outs[-3], step) # low-pi summary
         summary_writer.add_summary(low_outs[-2], step) # low-q1 summary
         summary_writer.add_summary(low_outs[-1], step) # low-q2 summary
-
 
     def off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=100, discount=gamma, polyak=polyak):
         """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
@@ -764,7 +758,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # shape of the candidates (batch, n_cands, goal_dim)
         return candidates[np.arange(batch_size),max_indicies] # [for each batch, max index]
 
-
     def train_high_level_manager(train_ops, buffer, ep_len=(max_ep_len/manager_propose_freq), batch_size=batch_size, discount=gamma, polyak=polyak, step=0):
         """ train high-level actor-critic for each episode's (timesteps/manager_train_freq)
         TODO: determine what arguments to be parsed for this function.
@@ -783,7 +776,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         rospy.logwarn("Now trains the high-level controller for %d timesteps", ep_len)
         _man_buffer = buffer
         # execute off-policy correction before training
-        for itr in range(ep_len):
+        for itr in tqdm(range(ep_len)):
             cur_step = step - int(ep_len * manager_propose_freq) + itr
             batch = _man_buffer.sample_batch(batch_size)
             # subgoal here is the action of manager network, action for computing log-likelihood
@@ -805,7 +798,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
             q_hi_outs = sess.run(q_ops+[man_q_summary], man_feed_dict)
 
-            if itr % delayed_update_freq ==0: # delayed update of the policy and target nets.
+            if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
                 pi_hi_outs = sess.run(pi_ops + [man_pi_summary], man_feed_dict)
                 summary_writer.add_summary(pi_hi_outs[-1] , cur_step) # low-pi summary
                 wandb.log({'policy_loss_hi': pi_hi_outs[0]})       
@@ -821,7 +814,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         rospy.logwarn("Pre-trains the high-level controller for %d timesteps", pretrain_steps)
         _demo_buffer = demo_buffer
         # execute off-policy correction before training
-        for itr in range(pretrain_steps):
+        for itr in tqdm(range(pretrain_steps)):
             batch = _demo_buffer.sample_batch(batch_size)
             # off policy  correction is not required here 
             # action of the manager is subgoal...
@@ -838,9 +831,13 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
             pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
             _ = sess.run(q_ops, man_feed_dict)
-            if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
+            if itr + 1 % delayed_update_freq == 0: # delayed update of the policy and target nets.
                 _ = sess.run(pi_ops, man_feed_dict)
-
+            if itr + 1 % high_pretrain_save_freq == 0:
+                rospy.loginfo('##### saves manager_pretrain weights ##### for step %d', itr + 1)
+                saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt', global_step=itr + 1)
+                saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac_pretrain.ckpt'), global_step=itr + 1)
+            
     def normalize_observation(full_stt=None, c_obs=None, aux=None, act=None):
         """ normalizes observations for each step based on running mean-std.
         will only be used for each subgoal /action estimation from the manager/controller policy
@@ -976,7 +973,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         new_saver = tf.train.import_meta_graph(os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
         new_saver.restore(sess, os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}'.format(DATA_LOAD_STEP))
     # Main loop: collect experience in env and update/log each epoch
-    while not rospy.is_shutdown() and t <int(total_steps):
+    while not rospy.is_shutdown() and t < int(total_steps):
 
         if done or ep_len== max_ep_len: # if an episode is finished (no matter done==True)
             if t != 0 and train_indicator:
