@@ -46,7 +46,7 @@ CTRL_QF2_MODEL_LOADDIR = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_exp/ctrl
 # we exploit off-policy demo data with replay buffer
 rms_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_aux/'
 demo_path = '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac_aux/'
-home_path = '/home/irobot'
+catkin_path = '/home/irobot/catkin_ws/'
 MAN_BUF_FNAME = 'demo_manager_buffer.bin'
 CON_BUF_FNAME = 'demo_controller_buffer.bin'
 
@@ -297,8 +297,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
     # encoding ?? -> rather, shouldn't it be LSTM? g 
-    high_pretrain_steps = int(5E4) 
-    high_pretrain_save_freq = int(1e4)
+
 
     # wandb
     os.chdir(demo_path)
@@ -318,11 +317,15 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     wandb.config.polyak = polyak 
     wandb.config.pi_lr = pi_lr 
     wandb.config.vf_lr = vf_lr 
-    wandb.config.alp_lr = alp_lr 
+    wandb.config.alp_lr = alp_lr
+
     # model save/load
     USE_DEMO = True
     PRETRAIN_MANAGER = True
+    USE_PRETRAINED_MANAGER = False
     DATA_LOAD_STEP = 20000
+    high_pretrain_steps = int(1E4) 
+    high_pretrain_save_freq = int(1e4)
 
     IS_TRAIN = train_indicator
     USE_CARTESIAN = True
@@ -811,32 +814,37 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         """ Pre-trains the manager actor-critic network with data collected from demonstartions.
         TODO: check if tensorboard logging is valid here. 
         """
-        rospy.logwarn("Pre-trains the high-level controller for %d timesteps", pretrain_steps)
-        _demo_buffer = demo_buffer
-        # execute off-policy correction before training
-        for itr in tqdm(range(pretrain_steps)):
-            batch = _demo_buffer.sample_batch(batch_size)
-            # off policy  correction is not required here 
-            # action of the manager is subgoal...
-            man_feed_dict = {
-                            stt_ph : normalize_observation(full_stt=batch['st']),
-                            stt1_ph : normalize_observation(full_stt=batch['st1']),
-                            sg_ph : normalize_observation(full_stt=batch['acts']),
-                            dg_ph : normalize_observation(full_stt=batch['g']),
-                            dg1_ph : normalize_observation(full_stt=batch['g1']),
-                            aux_ph : normalize_observation(aux=batch['aux']),
-                            aux1_ph : normalize_observation(aux=batch['aux1']),
-                            rew_ph_hi: batch['rews'],
-                            dn_ph : batch['done'],}                                                    
-            q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
-            pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
-            _ = sess.run(q_ops, man_feed_dict)
-            if itr + 1 % delayed_update_freq == 0: # delayed update of the policy and target nets.
-                _ = sess.run(pi_ops, man_feed_dict)
-            if itr + 1 % high_pretrain_save_freq == 0:
-                rospy.loginfo('##### saves manager_pretrain weights ##### for step %d', itr + 1)
-                saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt', global_step=itr + 1)
-                saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac_pretrain.ckpt'), global_step=itr + 1)
+        if USE_PRETRAINED_MANAGER:
+            os.chdir(catkin_path)
+            new_saver = tf.train.import_meta_graph(os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
+            new_saver.restore(sess, os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt-{0}'.format(DATA_LOAD_STEP))
+        else:
+            rospy.logwarn("Pre-trains the high-level controller for %d timesteps", pretrain_steps)
+            _demo_buffer = demo_buffer
+            # execute off-policy correction before training
+            for itr in tqdm(range(pretrain_steps)):
+                batch = _demo_buffer.sample_batch(batch_size)
+                # off policy  correction is not required here 
+                # action of the manager is subgoal...
+                man_feed_dict = {
+                                stt_ph : normalize_observation(full_stt=batch['st']),
+                                stt1_ph : normalize_observation(full_stt=batch['st1']),
+                                sg_ph : normalize_observation(full_stt=batch['acts']),
+                                dg_ph : normalize_observation(full_stt=batch['g']),
+                                dg1_ph : normalize_observation(full_stt=batch['g1']),
+                                aux_ph : normalize_observation(aux=batch['aux']),
+                                aux1_ph : normalize_observation(aux=batch['aux1']),
+                                rew_ph_hi: batch['rews'],
+                                dn_ph : batch['done'],}                                                    
+                q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
+                pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
+                _ = sess.run(q_ops, man_feed_dict)
+                if itr + 1 % delayed_update_freq == 0: # delayed update of the policy and target nets.
+                    _ = sess.run(pi_ops, man_feed_dict)
+                if itr + 1 % high_pretrain_save_freq == 0:
+                    rospy.loginfo('##### saves manager_pretrain weights ##### for step %d', itr + 1)
+                    saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt', global_step=itr + 1)
+                    saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac_pretrain.ckpt'), global_step=itr + 1)
             
     def normalize_observation(full_stt=None, c_obs=None, aux=None, act=None):
         """ normalizes observations for each step based on running mean-std.
@@ -947,6 +955,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         load_demo_rms()
         rospy.loginfo('Successfully loaded demo transitions on the buffers!')
 
+    # back to catkin_ws to resolve directory conflict issue
     if PRETRAIN_MANAGER:
         pretrain_manager(demo_buffer=manager_buffer, pretrain_steps=high_pretrain_steps, train_ops=step_hi_ops)
 
@@ -1103,7 +1112,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
             if t % save_freq == 0 and train_indicator:
                 rospy.loginfo('##### saves network weights ##### for step %d', t)
-                saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
+                saver.save(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
                 saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac.ckpt'), global_step=t)  
 
 
