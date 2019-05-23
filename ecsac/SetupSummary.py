@@ -225,7 +225,7 @@ class SummaryManager(object):
 class SummaryManager_HIRO(object):
     """ Implementation of EC_SAC in HIRO architecture
     """
-    def __init__(self, sess, obs_shape_list, summary_writer):
+    def __init__(self, obs_shape_list, sess=None, summary_writer=None):
         self.sess = sess
         _obs_shape_list = obs_shape_list
         self.summary_writer = summary_writer
