@@ -156,12 +156,12 @@ def mlp_categorical_policy(x, a, hidden_sizes, activation, output_activation, ac
     logp_pi = tf.reduce_sum(tf.one_hot(pi, depth=act_dim) * logp_all, axis=1)
     return pi, logp, logp_pi
 
-def mlp_deterministic_policy(stt, goal, sub_goal, aux, activation=tf.nn.relu, hidden_sizes=(512,256,256), output_activation=tf.nn.tanh, kernel_initializer=ortho_init(init_scale), kernel_regularizer=None):
+def mlp_deterministic_policy(stt, sub_goal, aux, activation=tf.nn.relu, hidden_sizes=(512,256,256), output_activation=tf.nn.tanh, kernel_initializer=ortho_init(init_scale), kernel_regularizer=None):
     """ policy for high-level manager, TD3 policy
     """
     batch_size = sub_goal.shape.as_list()[0]
     sg_dim = sub_goal.shape.as_list()[-1]
-    net = mlp(tf.concat([stt,goal], axis=-1), list(hidden_sizes), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer)
+    net = mlp(tf.concat([stt], axis=-1), list(hidden_sizes), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer)
     mu = tf.layers.dense(net, sg_dim, activation=output_activation, kernel_initializer=kernel_initializer)
 
     return mu, net, batch_size
@@ -234,7 +234,7 @@ Actor-Critics for manager class : mu_hi, deterministic policy
 """
 
 
-def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space=None, hidden_sizes=(300,300), activation=tf.nn.relu, 
+def mlp_manager_actor_critic(stt, sub_goal, aux, action_space=None, hidden_sizes=(200,200), activation=tf.nn.relu, 
                      output_activation=tf.tanh, policy=mlp_deterministic_policy):
     """ actor-critic for TD3
         args: 
@@ -246,7 +246,7 @@ def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space=None, hidden
 
     # policy
     with tf.variable_scope('pi'): # '/manager/main/pi/'
-        mu, _pre_act, batch_size = policy(stt, goal, sub_goal, aux, activation=activation, hidden_sizes=hidden_sizes,
+        mu, _pre_act, batch_size = policy(stt, sub_goal, aux, activation=activation, hidden_sizes=hidden_sizes,
                                           output_activation=output_activation, kernel_initializer=ortho, kernel_regularizer=kernel_regularizer)
 
     # policy reg losses
@@ -259,11 +259,11 @@ def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space=None, hidden
     # vfs for TD3
     vf_mlp = lambda x : tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None, kernel_regularizer=kernel_regularizer), axis=1)
     with tf.variable_scope('q1'):
-        q1 = vf_mlp(tf.concat([stt, goal, sub_goal, aux], axis=-1))
+        q1 = vf_mlp(tf.concat([stt, sub_goal, aux], axis=-1)) # sub_goal -> off-policy data
     with tf.variable_scope('q1', reuse=True):
-        q1_pi = vf_mlp(tf.concat([stt, goal, mu, aux], axis=-1))
+        q1_pi = vf_mlp(tf.concat([stt, mu, aux], axis=-1)) # mu -> on-policy data (tensor-connected)
     with tf.variable_scope('q2'):
-        q2 = vf_mlp(tf.concat([stt, goal, sub_goal, aux], axis=-1))
+        q2 = vf_mlp(tf.concat([stt, sub_goal, aux], axis=-1)) # sub_goal -> off-policy data
 
     return mu, q1, q2, q1_pi, preact_reg
 

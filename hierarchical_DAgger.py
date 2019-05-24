@@ -95,8 +95,6 @@ class DemoReplayBuffer(object):
         <s, s', g, g'>
         slicing index : buf[global_step - ep_len:global_step-1] => slice out only the transitions for this episode.
         """
-        rospy.logwarn('===== Current buffer data length =====')
-        print (self.stt_buf.shape[0])
         return [self.stt_buf[global_step-ep_len:global_step], self.stt1_buf[global_step-ep_len:global_step], 
                 self.g_buf[global_step-ep_len:global_step], self.g1_buf[global_step-ep_len:global_step]]
 
@@ -126,8 +124,8 @@ class DemoManagerReplayBuffer(DemoReplayBuffer):
 
         super(DemoManagerReplayBuffer, self).__init__(obs_dim, stt_dim, act_dim, aux_dim, size, manager=True)
 
-        self.stt_seq_buf = np.zeros(shape=(size, seq_len + 1, stt_dim), dtype=np.float32) # s_t (-1, 10+1, 21), joint pos, vel, eff
-        self.obs_seq_buf = np.zeros(shape=(size, seq_len + 1,)+ obs_dim, dtype=np.float32) # o_t, (-1, 10+1, 100, 100, 3)
+        self.stt_seq_buf = np.zeros(shape=(size, seq_len+1, stt_dim), dtype=np.float32) # s_t (-1, 10+1, 21), joint pos, vel, eff
+        self.obs_seq_buf = np.zeros(shape=(size, seq_len+1,)+ obs_dim, dtype=np.float32) # o_t, (-1, 10+1, 100, 100, 3)
         self.act_seq_buf = np.zeros(shape=(size, seq_len, act_dim), dtype=np.float32) # a_t (-1,10, 8)
 
     def store(self, stt_seq, obs_seq, act_seq, *args, **kwargs):
@@ -215,10 +213,10 @@ if __name__ == '__main__':
     # rospy.init_node('hierarchical_DAgger')
 
     # demo quantity related
-    total_epi = 20
+    total_epi = 1
     max_ep_len = 500
     total_steps = total_epi * max_ep_len
-    buffer_size = int(5e4) # 50000 steps : is it enough?
+    buffer_size = int(1e4) # 50000 steps : is it enough?
     manager_propose_freq = 10
 
     isDemo = True
@@ -313,28 +311,14 @@ if __name__ == '__main__':
             in terms of controller -> g_t:t+c-1
             index : 2 & 3
         """
-        rospy.logwarn('====== DEBUGGING... DEBUGGING... DEBUGGING... ======')
-        print ('global_step')
-        print (global_step)
         # s_t+c should be the g_t for s_t. (e.g. s_10 == g_0 -> induces new proposal)
         sb, s1b, gb, g1b = controller_buffer.get_episodic_subgoal(global_step, ep_len) # returns each batch of the transition e<s, s', g, g'>
-        print ('data_shapes')
-        print (sb.shape)
-        print (s1b.shape)
-        print (gb.shape)
-        print (g1b.shape)
         # ep_len - ep_len % manager_propose_freq
         # Example : if an episode is 647 length, iterate till 640 (idx 639). Then, gb[640:646] should all be the terminal state. 
         # 1. replace the subgoal proposals in 'gb'
-        remainder = sb.shape[0] % manager_propose_freq
-        print (ep_len)
-        print ('remainder')
-        print (remainder)
-        print ('man_prop_freq')
-        print (manager_propose_freq)
-        print ('idx')
-        for idx in range(0, sb.shape[0] - remainder - manager_propose_freq, manager_propose_freq): # iterate until the full proposal period is met.
-            print (idx)
+
+        remainder = ep_len % manager_propose_freq
+        for idx in range(0, ep_len - remainder - manager_propose_freq, manager_propose_freq): # iterate until the full proposal period is met.
             gb[idx] = s1b[idx + manager_propose_freq - 1] # s1b[idx + manager_propose_freq - 1] has the s_(idx + manager_propose_freq)
             for i in range(1, manager_propose_freq): #[t+1:t+c-1]
                 gb[idx + i] = env.env_goal_transition(sb[idx + i], s1b[idx + i], gb[idx])
@@ -356,9 +340,10 @@ if __name__ == '__main__':
 
     # divide the loop into two phase.
     # 1. rollout (collecting normal transition data (s, a, r, s', d))
+
     while not rospy.is_shutdown() and t <int(total_steps):
 
-        if done or ep_len == max_ep_len: # if an episode is finished (no matter done==True)
+        if done or ep_len== max_ep_len: # if an episode is finished (no matter done==True)
             if t != 0:
                 # Process final state/obs, store manager transition i.e. state/obs @ t+c
                 if len(manager_temp_transition[2]) != 1:
@@ -390,6 +375,7 @@ if __name__ == '__main__':
             ep_ret = 0 # episode return for the manager
             ep_low_ret = 0 # return of the intrinsic reward for low level controller 
             episode_num += 1 # for every env.reset()
+
             # process observations
             full_stt = np.concatenate(obs['observation']['full_state'], axis=0) # s_0
             c_obs = obs['observation']['color_obs'] #o_0
@@ -445,7 +431,7 @@ if __name__ == '__main__':
 
         # update logging steps
         ep_len += 1
-        t += 1
+        t +=1
         timesteps_since_manager += 1
         timesteps_since_subgoal += 1
 
@@ -474,15 +460,17 @@ if __name__ == '__main__':
 
     os.chdir(demo_path)
     if os.path.exists(MAN_BUF_FNAME):
-        ans = input("Delete the manager buffer? '1' / '0' :")
+        print ('Deletes the manger buffer')
+        ans = input("Delete the manager buffer? '1' / '0' ")
+        rospy.logwarn('=======================================================')
         if ans == 1:
-            print ('Deletes the manger buffer')
             os.remove(MAN_BUF_FNAME)
     if os.path.exists(CON_BUF_FNAME):
-        ans = input("Delete the controller buffer? '1' / '0' :")
+        print ('Deletes the controller buffer')
+        ans = input("Delete the controller buffer? '1' / '0' ")
         if ans == 1:
-            print ('Deletes the controller buffer')
             os.remove(CON_BUF_FNAME)
+        rospy.logwarn('=======================================================')
 
     print ('Now saves the manager buffer in pickle format')
     with open (MAN_BUF_FNAME, 'wb') as f:             

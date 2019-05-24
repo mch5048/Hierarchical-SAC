@@ -5,7 +5,7 @@ import rospy
 import rospkg
 import numpy as np
 # import super class
-from Sawyer_DynaGoalEnv_SAC_v0 import robotEnv
+from Sawyer_PickAndPlaceEnv_v0 import robotEnv
 import time
 from time import sleep
 from intera_core_msgs.msg import JointCommand

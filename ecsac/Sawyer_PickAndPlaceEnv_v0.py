@@ -42,6 +42,7 @@ from intera_core_msgs.srv import (
 from controllers_connection import ControllersConnection
 import modern_robotics as mr
 import tf
+from utils.common import rate_limited
 
 
 base_dir = os.path.dirname(os.path.realpath(__file__))
@@ -123,6 +124,8 @@ GRIPPER_LOWER = 0.0
 TERM_THRES = 50
 SUC_THRES = 50
 
+CTRL_PERIOD = 70 # in Hz, hard sync 
+
 class robotEnv(): 
     def __init__(self, max_steps=700, isdagger=False, isPOMDP=False, isGripper=False, isCartesian=True, train_indicator=1):
         """An implementation of OpenAI-Gym style robot reacher environment
@@ -163,7 +166,7 @@ class robotEnv():
         self.max_steps = max_steps
         self.reward = 0
         self.reward_rescale = 1.0
-        self.reward_type = 'sparse'
+        self.reward_type = 'dense'
         self.destPos = np.array([0.5, 0.0, 0.0])
         self.joint_cmd_msg = JointCommand()
         if self.isGripper:
@@ -378,7 +381,7 @@ class robotEnv():
             rospy.logwarn('Initialized pose.')
             rospy.delete_param('vel_calc')
 
-
+    @rate_limited(CTRL_PERIOD)
     def step(self, action=None, time_step=0):#overriden function
         """
         Function executed each time step.
@@ -431,20 +434,23 @@ class robotEnv():
             print("Actions: ", act)
         # achieved goal should be equivalent to the step observation dict.
         goal_obs = dict()
-        obs = dict()
-        obs['full_state'] = [_joint_pos, _joint_vels, _joint_effos] # default observations
+        obs = dict() # consists of 1. meas : [q, qdot, tau]  2. aux : [kine_pose, obj_pos] 3. observation : color_obs
+        aux = [] # end_effector pose + target_object position
+        obs['meas_state'] = [_joint_pos, _joint_vels, _joint_effos] # default observations
         goal_obs['full_state'] = [_joint_pos, _joint_vels, _joint_effos] # default goal_observations
+        obs['auxiliary'] = [_targ_obj_obs]
+    
 
         if self.isGripper:
-            obs['full_state'].append([_gripper_pos])
+            obs['meas_state'].append([_gripper_pos])
             goal_obs['full_state'].append([_gripper_pos])
         if self.isCartesian:
-            obs['full_state'].append(_ee_pose)
+            obs['auxiliary'].append(_ee_pose)
             goal_obs['full_state'].append(_ee_pose)
         if self.isPOMDP:
             obs['color_obs'] = _color_obs
             goal_obs['color_obs'] = _color_obs
-        return {'observation': obs,'achieved_goal':goal_obs, 'auxiliary':_targ_obj_obs}, self.reward_rescale*self.reward, self.done
+        return {'observation': obs,'achieved_goal':goal_obs}, self.reward_rescale*self.reward, self.done
 
 
     def get_desired_goals(self):
@@ -691,15 +697,15 @@ class robotEnv():
         _start_pose.position.z += 0.00
         _start_pose.orientation = overhead_orientation
         self.gripper_open()
-        self._servo_to_pose(_start_pose)
+        # self._servo_to_pose(_start_pose) # des goal is not necessary
         self._load_table()
         rospy.logwarn('======================================================')
         print ('block pose', block_pose)
         rospy.logwarn('======================================================')
         self.demo_target_pub.publish(block_pose) # publish target pose for velocity controller
         self._load_target_block(block_pose=block_pose) 
-        rospy.sleep(1.0)
-        self.gripper_close()
+        # rospy.sleep(1.0)
+        # self.gripper_close()
         return self.get_desired_goals()
 
 
@@ -776,14 +782,15 @@ class robotEnv():
         _gripper_pos = self.get_gripper_position()
         _ee_pose = self.get_end_effector_pose()
         obs = dict()
-        obs['full_state'] = [_joint_pos, _joint_vels, _joint_effos] # default observations
+        obs['meas_state'] = [_joint_pos, _joint_vels, _joint_effos] # default observations
+        obs['auxiliary'] = [_targ_obj_obs] # default observations
         if self.isGripper:
-            obs['full_state'].append([_gripper_pos])
+            obs['meas_state'].append([_gripper_pos])
         if self.isCartesian:
             obs['full_state'].append(_ee_pose)
         if self.isPOMDP:
             obs['color_obs'] = _color_obs
-        return {'observation': obs,'desired_goal':des_goal, 'auxiliary':_targ_obj_obs}
+        return {'observation': obs,'desired_goal':des_goal}
 
 
     def _load_target_block(self, block_pose=Pose(position=Point(x=0.6725, y=0.1265, z=0.7825)),

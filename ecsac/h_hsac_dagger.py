@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import numpy as np
-from Sawyer_DynaGoalEnv_DAgger import demoEnv # REFACTOR TO REMOVE GOALS
+from Sawyer_PickAndPlace_DAgger import demoEnv # REFACTOR TO REMOVE GOALS
 import rospy
 # Leveraging demonstration is same as TD3
 
@@ -335,7 +335,8 @@ if __name__ == '__main__':
         print ('idx')
         for idx in range(0, sb.shape[0] - remainder - manager_propose_freq, manager_propose_freq): # iterate until the full proposal period is met.
             print (idx)
-            gb[idx] = s1b[idx + manager_propose_freq - 1] # s1b[idx + manager_propose_freq - 1] has the s_(idx + manager_propose_freq)
+            # gb[idx] = s1b[idx + manager_propose_freq - 1] - s1b[idx - 1] # s1b[idx + manager_propose_freq - 1] has the s_(idx + manager_propose_freq)
+            gb[idx] = sb[idx + manager_propose_freq] - sb[idx] # g_kc = g_(k+1)c - s_kc , k= 0,1,2,...
             for i in range(1, manager_propose_freq): #[t+1:t+c-1]
                 gb[idx + i] = env.env_goal_transition(sb[idx + i], s1b[idx + i], gb[idx])
         # 2. fill ther remaining transitions with terminal state observations

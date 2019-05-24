@@ -33,6 +33,8 @@ from PyKDL import *
 from pykdl_utils.kdl_parser import kdl_tree_from_urdf_model
 # conversiom btwn PyKDL frame, ROS message and tf.transformation
 import tf_conversions.posemath as pm
+import inspect
+
 
 ####################
 # GLOBAL VARIABLES #
@@ -73,7 +75,7 @@ class VelocityControl(object):
         self.int_anti_windup = 10
 
         self.rate = 100.0  #Hz
-        self.sample_time = 1.0/self.rate * 2.5  #ms
+        self.sample_time = 1.0/self.rate  #ms
         self.USE_FIXED_RATE = False # If true -> dT = 0.01, Else -> function call time difference 
         self.current_time = time.time()
         self.last_time = self.current_time
@@ -84,20 +86,21 @@ class VelocityControl(object):
         self.time_limit = rospy.get_param("~time_limit", TIME_LIMIT)
         self.damping = rospy.get_param("~damping", DAMPING)
         self.joint_vel_limit = rospy.get_param("~joint_vel_limit", JOINT_VEL_LIMIT)
-        self.q = np.zeros(7)        # Joint angles
+        # self.q = np.zeros(7)        # Joint angles
+        self.q = np.array([0.0, -0.5, 0.0, 0.8, 0.0, 1.2, 0.0])        # Joint angles
         self.qdot = np.zeros(7)     # Joint velocities
         self.T_goal = np.array(self.kin.forward(self.q))    # Ref se3
         self.cur_frame = pm.fromMatrix(self.T_goal) # -> PyKDL frame
         # robot @ its original pose : position (0.3161, 0.1597, 1.151) , orientation (0.337, 0.621, 0.338, 0.621)
-        self.original_goal = self.T_goal.copy() # robot @ its home pose : 
+        self.original_goal = self.T_goal.copy() # robot @ it\\s home pose : 
         print ('Verifying initial pose...')
         print (self.T_goal)
         self.isCalcOK = False
         self.isPathPlanned = False
         self.traj_err_bound = float(1e-2) # in meter
-        self.plan_time = 2.5 # in sec. can this be random variable?
-        self.rand_plan_min = 5.0
-        self.rand_plan_max = 9.0
+        self.plan_time = 5.0 # in sec. can this be random variable?
+        self.rand_plan_min = 2.0
+        self.rand_plan_max = 2.5
         # Subscriber
         self.ee_position = [0.0, 0.0, 0.0]
         self.ee_orientation = [0.0, 0.0, 0.0, 0.0]
@@ -114,7 +117,8 @@ class VelocityControl(object):
         self.traj_list = [None for _ in range(self.num_wp)]
         self.traj_elapse = 0.0 # in ms
 
-        self.r = rospy.Rate(self.rate)
+        # self.r = rospy.Rate(self.rate)
+        self.r = rospy.Rate(100)
         # robot chain for the ik solver of PyKDL
         # This constructor parses the URDF loaded in rosparm urdf_param into the
         # needed KDL structures. 
@@ -127,7 +131,7 @@ class VelocityControl(object):
         self.ik_v_kdl = PyKDL.ChainIkSolverVel_pinv(self.sawyer_chain)
         self._num_jnts = 7
         self._joint_names = ['right_j0', 'right_j1', 'right_j2', 'right_j3', 'right_j4', 'right_j5', 'right_j6']
-
+        
         rospy.loginfo('Check the URDF of sawyer')
         self.print_robot_description()
         rospy.loginfo('Check the sanity of kinematic chain')
@@ -135,13 +139,14 @@ class VelocityControl(object):
         self.prev_frame = PyKDL.Frame() # initialize as identity frame
         self.init_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
         self.integ_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
-
+        self.integ_twist = PyKDL.Twist(PyKDL.Vector(0, 0, 0), PyKDL.Vector(0, 0, 0))
+        self.dist_threshold = 0.10
         # control loop
         while not rospy.is_shutdown():
             if rospy.has_param('vel_calc'):
                 if not self.isPathPlanned: # if path is not planned
-                    self.path_planning() # get list of planned waypoints
-                # self.calc_joint_vel_2()
+                    _type = rospy.get_param('vel_calc')
+                    self.path_planning(_type) # get list of planned waypoints
                 self.calc_joint_vel_3()
             self.r.sleep()
 
@@ -149,7 +154,7 @@ class VelocityControl(object):
     def ref_poseCB(self, goal_pose): # Takes target pose, returns ref se3
         rospy.logdebug("ref_pose_cb called in velocity_control.py")
         # p = np.array([some_pose.position.x, some_pose.position.y, some_pose.position.z])
-        p = np.array([goal_pose.position.x, goal_pose.position.y, goal_pose.position.z])
+        p = np.array([goal_pose.position.x, goal_pose.position.y + 0.04, goal_pose.position.z])
         quat = np.array([goal_pose.orientation.x, goal_pose.orientation.y, goal_pose.orientation.z, goal_pose.orientation.w])
         goal_tmp = tr.compose_matrix(angles=tr.euler_from_quaternion(quat, 'sxyz'), translate=p) # frame is spatial 'sxyz', return Euler angle from quaternion for specified axis sequence.
         with self.mutex:
@@ -174,11 +179,10 @@ class VelocityControl(object):
 
 
     def _get_goal_matrix(self):
-        # print (self.cur_wp_idx)
         return self.traj_list[self.cur_wp_idx]
 
 
-    def path_planning(self):
+    def path_planning(self, path_type='default'):
         """ Generate desriable waypoints for achieving target pose.
             - Example
             dt = 0.01
@@ -194,16 +198,17 @@ class VelocityControl(object):
 
         X_current = self._get_tf_matrix(current_pose)
         X_goal = self.original_goal
-        # X_goal[2][3] += 0.05
+        X_goal[2][3] += 0.01
         rospy.logwarn('=============== Current pose ===============')
         print (X_current)
         rospy.logwarn('=============== Goal goal ===============')
         print (X_goal)
-        Tf = self.plan_time
-        # Tf = np.random.uniform(self.rand_plan_min, self.rand_plan_max)
+        # Tf = self.plan_time
+        Tf = np.random.uniform(self.rand_plan_min, self.rand_plan_max)
         N = int(Tf / dt) # ex: plantime = 7, dt = 0.01 -> N = 700
         self.num_wp = N
-        self.traj_list = r.CartesianTrajectory(X_current, X_goal, Tf=Tf, N=N, method=CUBIC)
+        # self.traj_list = r.CartesianTrajectory(X_current, X_goal, Tf=Tf, N=N, method=CUBIC)
+        self.traj_list = r.ScrewTrajectory(X_current, X_goal, Tf=Tf, N=N, method=QUINTIC)
         self.set_init_frame() # save the robot's pose frame at start of the trajectory.
         self.isPathPlanned = True
         # self._get_target_pose()
@@ -214,17 +219,20 @@ class VelocityControl(object):
         """
         _ee_position = self._get_ee_position()
         _targ_wp_position = tr.translation_from_matrix(self.traj_list[self.cur_wp_idx])
-        # if np.linalg.norm( np.array(_ee_position) -_targ_wp_position) <= self.traj_err_bound:
+
         if self.cur_wp_idx < self.num_wp - 1: # indicate next waypoint
             self.cur_wp_idx += 1
             self.traj_elapse += dT
         elif self.cur_wp_idx == self.num_wp - 1: # robot has reached the last waypoint
             # rospy.logwarn('Reached target object')
             self.cur_wp_idx = 0
-            rospy.delete_param('vel_calc')
             self.isPathPlanned = False
             self.traj_elapse = 0
-
+            print ('Reset integral twist ...')
+            self.integ_twist = PyKDL.Twist(PyKDL.Vector(0, 0, 0), PyKDL.Vector(0, 0, 0)) # initialize integral twist 
+            if np.linalg.norm(np.array(self.ee_position) - self._get_target_pose()) <= self.dist_threshold:
+                rospy.logwarn('Reached target object')
+                rospy.delete_param('vel_calc')
 
     def _get_target_pose(self):
         """ Get the episodic target pose of the object
@@ -234,7 +242,7 @@ class VelocityControl(object):
             object_state_srv = rospy.ServiceProxy('/gazebo/get_model_state', GetModelState)
             # object_state = object_state_srv("block", "world")
             object_state = object_state_srv("block", "base")
-            print ([object_state.pose.position.x, object_state.pose.position.y, object_state.pose.position.z])
+            return np.array([object_state.pose.position.x, object_state.pose.position.y, object_state.pose.position.z])
         except rospy.ServiceException as e:
             rospy.logerr("Spawn URDF service call failed: {0}".format(e)) 
 
@@ -391,8 +399,8 @@ class VelocityControl(object):
         if self.USE_FIXED_RATE:
             return self.sample_time
         else:
-            self.current_time = time.time()
-            return (self.current_time - self.last_time) / 1000.0
+            self.current_time = rospy.get_time()
+            return (self.current_time - self.last_time)
 
 
     def joints_to_kdl(self, type, values=None):
@@ -444,11 +452,12 @@ class VelocityControl(object):
                     tf::poseMsgToKDL(cart_pose, pose_kdl);
                     //                                cur_jnt_position, ee_vel
                     CartToJntVel(JointVelList[i].q, end_effector_vel.GetTwist(), NullSpaceBias[i], result_vel)
+                    ------------------------------------------------------------
+                    ChainIkSolverVel_pinv.CartToJnt(JntArray, Twist, JntArray)                    
                     kin.ik_solver->CartTo
         """
-        frame_vel = PyKDL.FrameVel()
         _joint_vels = self.joints_to_kdl(type='velocities', values=None)
-        # args :   CartToJnt-> (cur_joint_pos, targ_ee_vel, result_joint_vel)  
+        # args :   CartToJnt-> (cur_joint_pos, targ_ee_vel, result_joint_vel)
         if self.ik_v_kdl.CartToJnt(cur_joint_pos, ee_twist, _joint_vels) >= 0:
             return list(_joint_vels)
         else:
@@ -483,8 +492,10 @@ class VelocityControl(object):
     def get_des_twist(self, dT):
         """ Get desired twist @ time t, by computing differential of traj_frame @ t=T-1 and t=T
         """
-        _cur_frame = self.get_current_frame()
-        return PyKDL.diff(self.prev_frame, _cur_frame, dT)
+        if self.cur_wp_idx > 1: 
+            return PyKDL.diff(pm.fromMatrix(self.traj_list[self.cur_wp_idx - 1]), pm.fromMatrix(self.traj_list[self.cur_wp_idx]), dT)
+        else: # cur_wp_idx == num_wp
+            return PyKDL.diff(pm.fromMatrix(self.traj_list[self.cur_wp_idx]), pm.fromMatrix(self.traj_list[self.cur_wp_idx + 1]), dT)
 
 
     def get_frame(self, matrix):
@@ -546,14 +557,32 @@ class VelocityControl(object):
     def integ_error(self, twist_err, dT):
         """Apply timestep-wise error integration.
         """
-        self.integ_frame = PyKDL.addDelta(self.integ_frame, twist_err, dT)
-        return PyKDL.diff(self.init_frame, self.integ_frame, self.traj_elapse)
+        # self.integ_frame = PyKDL.addDelta(self.integ_frame, twist_err, dT)
+        # return PyKDL.diff(self.init_frame, self.integ_frame, self.traj_elapse)
+        if np.linalg.norm(list(self.integ_twist)) < self.int_anti_windup:
+            self.integ_twist += twist_err * dT
+        return self.integ_twist
 
 
     def apply_gain(self, prop_err, integ_err):
-        Kp = 2.0
-        Ki = 0.05
+        Kp = 1.0
+        Ki = 0.0
         return Kp * prop_err, Ki * integ_err
+
+
+    def to_kdl_twist(self, twst):
+        """ Return the twist of PyKDL for given list type twist.
+        """
+        return PyKDL.Twist(PyKDL.Vector(twst[0], twst[1], twst[2]), PyKDL.Vector(twst[3], twst[4], twst[5]))
+
+
+    def adj_to_twist(self, err_matrix, des_twist):
+        return list(np.dot(r.Adjoint(err_matrix), des_twist))
+
+
+    def get_cur_fk_matrix(self):
+        self.get_q_now()
+        return self.kin.forward(self.q)
 
 
     def calc_joint_vel_3(self):
@@ -562,29 +591,46 @@ class VelocityControl(object):
         with self.mutex:
             q_now = self.joints_to_kdl(type='positions', values=None)
             T_sd = self._get_goal_matrix() # 
+            targ_fr = self.get_frame(T_sd)
         dT = self.get_dt()
-        # rospy.logwarn('=============== Time difference ===============')
-        # print (dT)
-        targ_fr = self.get_frame(T_sd)
-        err_twist = self.get_err_twist(targ_fr, dT) # err term twist(Xd - X)
+        err_mat = np.dot(np.linalg.inv(pm.toMatrix(self.get_current_frame())), pm.toMatrix(targ_fr))
+
+        # err_twist = self.to_kdl_twist(r.se3ToVec(r.MatrixLog6(err_mat)).tolist()) # cbModern robotics pp 230 22Nff
+        # err_twist = self.get_err_twist(targ_fr, dT) # err term twist(Xd - X)
+        err_twist = self.get_err_twist(targ_fr, 1.0) # err term twist(Xd - X)
+        # err_twist = pm.fromMatrix(cur_fk) * _err_twist  
+        # err_twist *= 0.0
+
+        # des_twist = self.get_des_twist(dT) # feed-forward twist value Vd_dot
         des_twist = self.get_des_twist(dT) # feed-forward twist value Vd_dot
+        # des_twist = pm.fromMatrix(cur_fk) * _des_twist        
+        # des_twist = self.adj_to_twist(err_mat, _des_twist)
+        # des_twist =self.to_kdl_twist(des_twist)
         # rospy.logwarn('=============== Twist error ===============')
         # print (err_twist)
         # rospy.logwarn('=============== Twist desired ===============')
-        # print (des_twist)
+        # print (des_twist, self.cur_wp_idx)
         integ_twist = self.integ_error(err_twist, dT)
-        # rospy.logwarn('=============== Twist integtaed ===============')
+        # rospy.logwarn('=============== Twist integrated ===============')
         # print (integ_twist)
         err_twist, integ_twist = self.apply_gain(err_twist, integ_twist)
-        total_twist = des_twist + err_twist + integ_twist # FF + Pg*Err + Ig*Integ(Err)
+        # total_twist = des_twist  + err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
+        total_twist = err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
+        # self.q_dot = self.kdl_inv_vel_kine(cur_joint_pos=q_now, ee_twist=total_twist)
         self.q_dot = self.kdl_inv_vel_kine(cur_joint_pos=q_now, ee_twist=total_twist)
         self.q_dot = self.scale_joint_vel(self.q_dot)
         # publish joint command 
         qdot_output = dict(zip(self.names, self.q_dot))
+        # rospy.logwarn('=============== Computed joint vels ===============')
+        # print (qdot_output)
+        self.prev_frame = self.cur_frame # the call of this line seems crucial!!
         self.limb.set_joint_velocities(qdot_output)
+        # rospy.logwarn('=============== Twist actual ===============')
+        # print (self.ee_ang_twist + self.ee_lin_twist)
         
         self._check_traj(dT)
-        self.prev_frame = self.cur_frame
+        self.last_time = self.current_time
+
 
 
 def main():
