@@ -787,7 +787,7 @@ class robotEnv():
         if self.isGripper:
             obs['meas_state'].append([_gripper_pos])
         if self.isCartesian:
-            obs['full_state'].append(_ee_pose)
+            obs['auxiliary'].append(_ee_pose)
         if self.isPOMDP:
             obs['color_obs'] = _color_obs
         return {'observation': obs,'desired_goal':des_goal}

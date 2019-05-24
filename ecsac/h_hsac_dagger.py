@@ -119,23 +119,25 @@ class DemoManagerReplayBuffer(DemoReplayBuffer):
     high-level controller requires extra buffer for state-action 
     """
 
-    def __init__(self, obs_dim, stt_dim, act_dim, aux_dim,  size, seq_len):
+    def __init__(self, obs_dim, meas_stt_dim, act_dim, aux_stt_dim,  size, seq_len):
         """full-state/ color_observation sequence lists' shape[1] is +1 longer than that of 
         action seqence -> they are stored as s_t:t+c/o_t:t+c, while action is stored as a_t:t+c
         """
 
-        super(DemoManagerReplayBuffer, self).__init__(obs_dim, stt_dim, act_dim, aux_dim, size, manager=True)
+        super(DemoManagerReplayBuffer, self).__init__(obs_dim, meas_stt_dim, act_dim, aux_stt_dim, size, manager=True)
 
-        self.stt_seq_buf = np.zeros(shape=(size, seq_len + 1, stt_dim), dtype=np.float32) # s_t (-1, 10+1, 21), joint pos, vel, eff
+        self.meas_stt_seq_buf = np.zeros(shape=(size, seq_len + 1, meas_stt_dim), dtype=np.float32) # s_t (-1, 10+1, 21), joint pos, vel, eff
+        self.aux_stt_seq_buf = np.zeros(shape=(size, seq_len + 1, aux_stt_dim), dtype=np.float32) # s_t (-1, 10+1, 21), joint pos, vel, eff
         self.obs_seq_buf = np.zeros(shape=(size, seq_len + 1,)+ obs_dim, dtype=np.float32) # o_t, (-1, 10+1, 100, 100, 3)
         self.act_seq_buf = np.zeros(shape=(size, seq_len, act_dim), dtype=np.float32) # a_t (-1,10, 8)
 
-    def store(self, stt_seq, obs_seq, act_seq, *args, **kwargs):
+    def store(self, meas_stt_seq, aux_stt_seq, obs_seq, act_seq, *args, **kwargs):
         """store step transition in the buffer
         """
         super(DemoManagerReplayBuffer, self).store(manager=True, *args, **kwargs)
         
-        self.stt_seq_buf[self.ptr] = np.array(stt_seq)
+        self.meas_stt_seq_buf[self.ptr] = np.array(meas_stt_seq)
+        self.aux_stt_seq_buf[self.ptr] = np.array(aux_stt_seq)
         self.obs_seq_buf[self.ptr] = np.array(obs_seq)
         self.act_seq_buf[self.ptr] = np.array(act_seq)
         self.ptr = (self.ptr+1) % self.max_size
@@ -148,7 +150,8 @@ class DemoManagerReplayBuffer(DemoReplayBuffer):
                         self.g1_buf[:self.ptr], self.stt_buf[:self.ptr], self.stt1_buf[:self.ptr],
                         self.act_buf[:self.ptr], self.rews_buf[:self.ptr], self.done_buf[:self.ptr],
                         self.aux_buf[:self.ptr], self.aux1_buf[:self.ptr]],
-                'seq_data':[self.stt_seq_buf[:self.ptr], self.obs_seq_buf[:self.ptr], self.act_seq_buf[:self.ptr]],
+                'seq_data':[self.meas_stt_seq_buf[:self.ptr], self.aux_stt_seq_buf[:self.ptr], 
+                            self.obs_seq_buf[:self.ptr], self.act_seq_buf[:self.ptr]],
                 'size':self.size}
 
 
@@ -189,8 +192,8 @@ if __name__ == '__main__':
     # define observation dimensions
     # for low_level controller
     obs_dim = (100, 100, 3) # for actor in POMDP
-    stt_dim = 21# full_state of the robot (joint positions, velocities, and efforts) + ee position
-    act_dim = 8 # 7 joint vels and gripper position 
+    meas_stt_dim = 21# full_state of the robot (joint positions, velocities, and efforts) + ee position
+    act_dim = 7 # 7 joint vels and gripper position 
     aux_dim = 3 # target object's position
     # define joint vel_limits
     action_space = (-1.0, 1.0)
@@ -202,14 +205,15 @@ if __name__ == '__main__':
     sub_goal_dim = 21 # (joint positions, velocities, and efforts) + ee position
 
     if USE_CARTESIAN: # append 7-dim
-        stt_dim += ee_dim
+        aux_dim += ee_dim
         des_goal_dim += ee_dim
         sub_goal_dim += ee_dim
 
     if USE_GRIPPER: # append 1-dim
-        stt_dim += grip_dim
+        meas_stt_dim += grip_dim
         des_goal_dim += grip_dim
         sub_goal_dim += grip_dim
+        act_dim += grip_dim
 
     # init node
     # rospy.init_node('hierarchical_DAgger')
