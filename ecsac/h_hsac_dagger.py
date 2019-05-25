@@ -12,7 +12,7 @@ from SetupSummary import SummaryManager_HIRO as SummaryManager
 import pickle
 import os
 from collections import OrderedDict
-from state_action_space import *
+from state_action_space_h_hsac import *
 # intera imports 
 from intera_interface import CHECK_VERSION
 from intera_interface import Limb
@@ -53,22 +53,22 @@ class DemoReplayBuffer(object):
     high-level controller requires extra buffer for state-action 
     """
 
-    def __init__(self, obs_dim, stt_dim, act_dim, aux_dim, size, manager=False):
+    def __init__(self, obs_dim, meas_stt_dim, act_dim, aux_stt_dim, size, manager=False):
         # 9 types of data in buffer
         self.obs_buf = np.zeros(shape=(size,)+ obs_dim, dtype=np.float32) # o_t, (-1,100,100,3)
         self.obs1_buf = np.zeros(shape=(size,)+ obs_dim, dtype=np.float32) # o_t+1, (-1,100,100,3)
-        self.g_buf = np.zeros(shape=(size , stt_dim), dtype=np.float32) # g_t, (-1,21)
-        self.g1_buf = np.zeros(shape=(size , stt_dim), dtype=np.float32) # g_t+1, (-1,21)
-        self.stt_buf = np.zeros(shape=(size , stt_dim), dtype=np.float32) # s_t (-1,21), joint pos, vel, eff
-        self.stt1_buf = np.zeros(shape=(size , stt_dim), dtype=np.float32) # s_t+1 for (-1,21), consists of pos, vel, eff       self.act_buf = np.zeros(shape=(size, act_dim), dtype=np.float32) # A+t 3 dim for action
+        self.g_buf = np.zeros(shape=(size , meas_stt_dim), dtype=np.float32) # g_t, (-1,21)
+        self.g1_buf = np.zeros(shape=(size , meas_stt_dim), dtype=np.float32) # g_t+1, (-1,21)
+        self.stt_buf = np.zeros(shape=(size , meas_stt_dim), dtype=np.float32) # s_t (-1,21), joint pos, vel, eff
+        self.stt1_buf = np.zeros(shape=(size , meas_stt_dim), dtype=np.float32) # s_t+1 for (-1,21), consists of pos, vel, eff       self.act_buf = np.zeros(shape=(size, act_dim), dtype=np.float32) # A+t 3 dim for action
         if not manager:
             self.act_buf = np.zeros(shape=(size , act_dim), dtype=np.float32) # a_t (-1,8)
         else:
-            self.act_buf = np.zeros(shape=(size , stt_dim), dtype=np.float32)
+            self.act_buf = np.zeros(shape=(size , meas_stt_dim), dtype=np.float32)
         self.rews_buf = np.zeros(shape=(size,), dtype=np.float32)
         self.done_buf = np.zeros(shape=(size,), dtype=np.float32)
-        self.aux_buf = np.zeros(shape=(size , aux_dim), dtype=np.float32)
-        self.aux1_buf = np.zeros( shape=(size , aux_dim), dtype=np.float32)
+        self.aux_buf = np.zeros(shape=(size , aux_stt_dim), dtype=np.float32)
+        self.aux1_buf = np.zeros( shape=(size , aux_stt_dim), dtype=np.float32)
         self.ptr, self.size, self.max_size = 0, 0, size
 
     def store(self, obs, obs1, g, g1, stt, stt1, act, aux, aux1, rew, done, manager=False):
@@ -202,12 +202,12 @@ if __name__ == '__main__':
 
     # for high_level controller
     des_goal_dim = 21 # (joint positions, velocities, and efforts) + ee position
-    sub_goal_dim = 21 # (joint positions, velocities, and efforts) + ee position
+    sub_goal_dim = 21 # (joint positions, velocities, and efforts) 
 
     if USE_CARTESIAN: # append 7-dim
         aux_dim += ee_dim
         des_goal_dim += ee_dim
-        sub_goal_dim += ee_dim
+        # sub_goal_dim += ee_dim
 
     if USE_GRIPPER: # append 1-dim
         meas_stt_dim += grip_dim
@@ -237,8 +237,8 @@ if __name__ == '__main__':
 
     # demoEnv inherits robotEnv
     env = demoEnv(max_steps=max_ep_len, control_mode='velocity', isPOMDP=True, isGripper=USE_GRIPPER, isCartesian=USE_CARTESIAN, train_indicator=IS_TRAIN)
-    controller_buffer = DemoReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=buffer_size)
-    manager_buffer = DemoManagerReplayBuffer(obs_dim=obs_dim, stt_dim=stt_dim, act_dim=act_dim, aux_dim=aux_dim, size=buffer_size, seq_len=manager_propose_freq)
+    controller_buffer = DemoReplayBuffer(obs_dim=obs_dim, meas_stt_dim=meas_stt_dim, act_dim=act_dim, aux_stt_dim=aux_dim, size=buffer_size)
+    manager_buffer = DemoManagerReplayBuffer(obs_dim=obs_dim, meas_stt_dim=meas_stt_dim, act_dim=act_dim, aux_stt_dim=aux_dim, size=buffer_size, seq_len=manager_propose_freq)
     obs_shape_list = [(100,100,3), (7), (7), (7), (1), (7), (3)]
     summary_manager = SummaryManager(obs_shape_list=obs_shape_list) # manager for rms
 
@@ -246,19 +246,19 @@ if __name__ == '__main__':
     limb = Limb()
     gripper = Gripper()
 
-    def update_rms(full_stt=None, c_obs=None, aux=None, act=None):
+    def update_rms(meas_stt=None, c_obs=None, aux_stt=None, act=None):
         """Update the mean/stddev of the running mean-std normalizers.
         Normalize full-state, color_obs, and auxiliary observation.
         Caution on the shape!
         """
-        summary_manager.s_t0_rms.update(c_obs) # c_obs
-        summary_manager.s_t1_rms.update(full_stt[:7]) # joint_pos
-        summary_manager.s_t2_rms.update(full_stt[7:14]) # joint_vel
-        summary_manager.s_t3_rms.update(full_stt[14:21]) # joint_eff
-        summary_manager.s_t4_rms.update(full_stt[21:22]) # gripper_position
-        summary_manager.s_t5_rms.update(full_stt[22:]) # ee_pose
-        summary_manager.s_t6_rms.update(aux) # aux
-        summary_manager.a_t_rms.update(act) # ee_pose
+        summary_manager.s_t0_rms.update(c_obs) # c_obs (100, 100, 3)
+        summary_manager.s_t1_rms.update(meas_stt[:7]) # joint_pos (7,)
+        summary_manager.s_t2_rms.update(meas_stt[7:14]) # joint_vel (7,)
+        summary_manager.s_t3_rms.update(meas_stt[14:21]) # joint_eff (7,)
+        summary_manager.s_t4_rms.update(meas_stt[21:]) # gripper_position (1,)
+        summary_manager.s_t5_rms.update(aux_stt[3:]) # ee_pose (7,)
+        summary_manager.s_t6_rms.update(aux_stt[:3]) # aux (3,)
+        summary_manager.a_t_rms.update(act) # ee_pose (8,) -> qvel + grip on-off(binary)
 
 
     def load_rms():
@@ -287,6 +287,7 @@ if __name__ == '__main__':
 
     def get_demo_temp_subgoal():
         """ return the temporary subgoal for demo transition.
+        TODO : is it necessary?
         """
         return np.zeros(sub_goal_dim)
 
@@ -296,11 +297,12 @@ if __name__ == '__main__':
             replace the temp subgoals in temp manager buffer with expert subgoals for the rollout batches.
             The demo agent achieves the subgoal for every step, i.e. h = s + g - s'
                 g_t == s_t+c (action of the manager)
+                # g_kc = s_(k+1)c - s_kc , k= 0,1,2,... (for measured state!)
             *manager_transition :
-                [s_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done]
+                [[meas_stt_seq], [aux_stt_seq], [c_obs_seq], [act_seq], c_obs, c_obs_c, None, None, meas_stt, meas_stt_c, subgoal, aux_stt, aux_stt_c, 0, False]
             replace the temp. subgoal (a_t of the manager) with s_t+c-1
         """
-        manager_transition[-5] = manager_transition[0][-1]
+        manager_transition[-5] = manager_transition[0][-1] - manager_transition[0][0]
         return manager_transition
 
 
@@ -321,8 +323,10 @@ if __name__ == '__main__':
         print ('global_step')
         print (global_step)
         # s_t+c should be the g_t for s_t. (e.g. s_10 == g_0 -> induces new proposal)
+        # TODO :  implement asserting the shape below
         sb, s1b, gb, g1b = controller_buffer.get_episodic_subgoal(global_step, ep_len) # returns each batch of the transition e<s, s', g, g'>
         print ('data_shapes')
+        print ('following shapes should be match')
         print (sb.shape)
         print (s1b.shape)
         print (gb.shape)
@@ -340,7 +344,7 @@ if __name__ == '__main__':
         for idx in range(0, sb.shape[0] - remainder - manager_propose_freq, manager_propose_freq): # iterate until the full proposal period is met.
             print (idx)
             # gb[idx] = s1b[idx + manager_propose_freq - 1] - s1b[idx - 1] # s1b[idx + manager_propose_freq - 1] has the s_(idx + manager_propose_freq)
-            gb[idx] = sb[idx + manager_propose_freq] - sb[idx] # g_kc = g_(k+1)c - s_kc , k= 0,1,2,...
+            gb[idx] = sb[idx + manager_propose_freq] - sb[idx] # g_kc = s_(k+1)c - s_kc , k= 0,1,2,...
             for i in range(1, manager_propose_freq): #[t+1:t+c-1]
                 gb[idx + i] = env.env_goal_transition(sb[idx + i], s1b[idx + i], gb[idx])
         # 2. fill ther remaining transitions with terminal state observations
@@ -366,25 +370,25 @@ if __name__ == '__main__':
         if done or ep_len == max_ep_len: # if an episode is finished (no matter done==True)
             if t != 0:
                 # Process final state/obs, store manager transition i.e. state/obs @ t+c
-                if len(manager_temp_transition[2]) != 1:
-                    #                               0       1    2      3    4     5    6     7     8     9     10    11     12    13    
-                    # buffer store arguments :    s_seq, o_seq, a_seq, obs, obs_1, dg,  dg_1, stt, stt_1, act,  aux, aux_1,  rew, done 
-                    manager_temp_transition[4] = c_obs # save o_t+c
-                    manager_temp_transition[8] = full_stt # save s_t+c
-                    manager_temp_transition[11] = aux # save aux_t+c
+                if len(manager_temp_transition[3]) != 1:
+                    #                               0                1              2           3       4       5        6     7     8           9        10        11       12     13    14    
+                    # buffer store arguments :  [[meas_st_seq], [aux_st_seq], [c_obs_seq], [act_seq], c_obs, c_obs_c, None, None, meas_stt, meas_stt_c, subgoal, aux_stt, aux_stt_c,  0, False]   
+                    manager_temp_transition[5] = c_obs # save o_t+c ** abstracted next state!
+                    manager_temp_transition[9] = meas_stt # save s_t+c ** abstracted next state!
+                    manager_temp_transition[12] = aux_stt # save aux_t+c ** abstracted next state!
                     manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode
                 # make sure every manager transition have the same length of sequence
                 # TODO: debug here...
-                if len(manager_temp_transition[0]) <= manager_propose_freq: # len(state_seq) = propose_1freq +1 since we save s_t:t+c as a seq.
+                if len(manager_temp_transition[0]) <= manager_propose_freq: # there's equal sign! len(state_seq) = propose_1freq +1 since we save s_t:t+c as a seq.
                     while len(manager_temp_transition[0]) <= manager_propose_freq:
-                        manager_temp_transition[0].append(full_stt) # s_seq
-                        manager_temp_transition[1].append(c_obs) # o_seq
-                        manager_temp_transition[2].append(action) # a_seq0
+                        manager_temp_transition[0].append(meas_stt) # s_seq
+                        manager_temp_transition[1].append(aux_stt) # s_seq
+                        manager_temp_transition[2].append(c_obs) # o_seq
+                        manager_temp_transition[3].append(action) # a_seq0
                 manager_temp_transition = demo_manager_sg_transition(manager_temp_transition)
                 demo_controller_sg_transition(controller_buffer, t, ep_len) # verify if the member of the buffer class is successfully modified.
                 # buffer store arguments : s_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done 
                 # print (manager_temp_transition[2])
-
                 manager_buffer.store(*manager_temp_transition) # off policy correction is done inside the manager_buffer 
                 save_rms(step=t)
             # reset the environment since an episode has been finished
@@ -396,10 +400,11 @@ if __name__ == '__main__':
             ep_low_ret = 0 # return of the intrinsic reward for low level controller 
             episode_num += 1 # for every env.reset()
             # process observations
-            full_stt = np.concatenate(obs['observation']['full_state'], axis=0) # s_0
+            meas_stt = np.concatenate(obs['observation']['meas_state'], axis=0) # s_0
             c_obs = obs['observation']['color_obs'] #o_0
             des_goal = np.concatenate(obs['desired_goal']['full_state'], axis=0) # g_des
-            aux = obs['auxiliary'] # g_des
+            aux_stt = np.concatenate(obs['observation']['auxiliary'], axis=0) # g_des
+            full_stt = np.concatenate([meas_stt, aux_stt], axis=0)
 
             # infer subgoal for low-level policy
             # args for get_subgoal : obs, next_obs, sub_goal
@@ -407,8 +412,9 @@ if __name__ == '__main__':
             timesteps_since_subgoal = 0
             # apply noise on the subgoal
             # create a temporal high-level transition : requires off-policy correction
-            # buffer store arguments :    s_seq,    o_seq, a_seq, obs,  obs_1,     dg,    dg_1,      stt, stt_1, act,  aux, aux_1,  rew, done 
-            manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
+            # buffer store arguments : meas_s_seq, aux_s_seq, o_seq, a_seq, obs, obs_c, dg,   dg_c, meas_stt, meas_stt_c, hi_act, aux, aux_c,  rew,    done 
+            #                               0           1           2       3    4      5     6
+            manager_temp_transition = [[meas_stt], [aux_stt], [c_obs], [], c_obs, None, None, None, meas_stt, None, subgoal, aux_stt, None,  0,   False]
 
         action = get_action() # a_t
         # TODO: make action on the gripper as categorical policy
@@ -424,29 +430,35 @@ if __name__ == '__main__':
         done = False if ep_len== max_ep_len else done
         if done:
             rospy.logwarn('=============== Now epsiode %d ends with done signal! ====================', episode_num)
-        next_full_stt = np.concatenate(next_obs['observation']['full_state']) # s_t
+        next_meas_stt = np.concatenate(next_obs['observation']['meas_state'], axis=0) # s_t
         next_c_obs = next_obs['observation']['color_obs'] #o_t
-        next_aux = obs['auxiliary'] # g_des
+        next_aux_stt = np.concatenate(next_obs['observation']['auxiliary'], axis=0) # s_aux
+        next_full_stt = np.concatenate([next_meas_stt, next_aux_stt], axis=0) 
 
         # append manager transition
-        manager_temp_transition[-1] = float(True)
+        manager_temp_transition[-1] = done # TODO verfiy
         manager_temp_transition[-2] += manager_reward # sum(R_t:t+c)
-        manager_temp_transition[0].append(next_full_stt) # append s_seq
-        manager_temp_transition[1].append(next_c_obs) # append o_seq
-        manager_temp_transition[2].append(action)     # append a_seq        
+        manager_temp_transition[0].append(next_meas_stt) # append s_seq
+        manager_temp_transition[1].append(next_aux_stt) # append o_seq
+        manager_temp_transition[2].append(next_c_obs)     # append a_seq        
+        manager_temp_transition[3].append(action)     # append a_seq        
         # compute intrinsic reward
-        intrinsic_reward = env.compute_intrinsic_reward(full_stt, next_full_stt, subgoal)
+        intrinsic_reward = env.compute_intrinsic_reward(meas_stt, next_meas_stt, subgoal)
 
         # subgoal transition
-        next_subgoal = env.env_goal_transition(full_stt, next_full_stt, subgoal)
+        next_subgoal = env.env_goal_transition(meas_stt, next_meas_stt, subgoal)
         # add transition for low-level policy
         # (obs, obs1, sg, sg1, stt, stt1, act, aux, rew, done)
+        # ( obs, obs1, g, g1, stt, stt1, act, aux, aux1, rew, done, manager=False):
+
         controller_buffer.store(c_obs, next_c_obs, subgoal, 
-        next_subgoal, full_stt, next_full_stt, action, aux, next_aux, intrinsic_reward, done)
+        next_subgoal, meas_stt, next_meas_stt, action, aux_stt, next_aux_stt, intrinsic_reward, done) # check the sequence of replay buffer..!
         # update observations and subgoal
         obs = next_obs
+        meas_stt = next_meas_stt
+        aux_stt = next_aux_stt
         subgoal = next_subgoal
-        aux = next_aux
+        full_stt = next_full_stt
 
         # update logging steps
         ep_len += 1
@@ -457,23 +469,19 @@ if __name__ == '__main__':
         if timesteps_since_subgoal % manager_propose_freq == 0:
             # for every c-step, renew the subgoal estimation from the manager policy.
             timesteps_since_subgoal = 0
-            manager_temp_transition[4] = c_obs # save o_t+c
-            manager_temp_transition[8] = full_stt # save s_t+c
-            manager_temp_transition[11] = aux # save aux_t+c
+            manager_temp_transition[5] = c_obs # save o_t+c
+            manager_temp_transition[9] = meas_stt # save s_t+c
+            manager_temp_transition[12] = aux_stt # save aux_t+c
             manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode 
             
-            # intentional seq appending is not required here since it always satisfies c step.
-
-            # rospy.logwarn('Debug manager transitions. Debug manager transitions.')
-            # print (manager_temp_transition[2])
-            # rospy.logwarn('Debug manager transitions. Debug manager transitions.')
             manager_buffer.store(*manager_temp_transition)
             subgoal = get_demo_temp_subgoal() # action_dim = (1, stt_dim) -> defaults to 25-dim
             # Create a high level transition : note that the action of manager policy is subgoal
-            # buffer store arguments :    s_seq,    o_seq, a_seq, obs,  obs_1,     dg,    dg_1,      stt, stt_1, act,  aux, aux_1,  rew, done 
-            manager_temp_transition = [[full_stt], [c_obs], [], c_obs, None, des_goal, des_goal, full_stt, None, subgoal, aux, None, 0, False]
+            # buffer store  indicies :      0           1       2       3    4      5    6      7       8       9      10       11      12  13  14
+            manager_temp_transition = [[meas_stt], [aux_stt], [c_obs], [], c_obs, None, None, None, meas_stt, None, subgoal, aux_stt, None, 0, False] # TODO: no reward @ init 
+
             # update running mean-std normalizer
-            update_rms(full_stt=full_stt, c_obs=c_obs, aux=aux, act=action) # do it.
+            update_rms(meas_stt=meas_stt, c_obs=c_obs, aux_stt=aux_stt, act=action) # do it.
 
     # if all the demo episodes have ended.
 

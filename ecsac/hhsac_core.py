@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 import rospy
 from collections import OrderedDict as od
-from state_action_space import *
+from state_action_space_h_hsac import *
 
 EPS = 1e-8
 CRIT_L2_REG = 1e-3
