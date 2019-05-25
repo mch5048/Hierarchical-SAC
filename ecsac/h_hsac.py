@@ -199,13 +199,10 @@ class ManagerReplayBuffer(ReplayBuffer):
         self.ptr = (demo_size + 1) % self.max_size
         self.size = min(demo_size + 1, self.max_size)
 """
-
 Midified Soft Actor-Critic
 SAC + Asym-AC + Leveraging demos
 (With slight variations that bring it closer to TD3)
-
 Added hierarchical learning + learnable temperature (alpha).
-
 """
 def td_target(reward, discount, next_value):
     return reward + discount * next_value
@@ -287,15 +284,14 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     manager_noise = 0.1 # for target policy smoothing.
     manager_noise_clip = 0.3 # for target policy smoothing.
     man_replay_size = int(5e4) # Memory leakage?
-    delayed_update_freq = 4
+    delayed_update_freq = 8
     #controller sac
     ctrl_replay_size = int(5e4) # Memory leakage?
     target_ent = 0.01 # learnable entropy
     reward_scale_lo = 1.0
 
     # coefs for nn ouput regularizers
-    reg_param = {'lam_mean':1e-3, 'lam_std':1e-3}
-    lam_preact = 0.0
+    reg_param = {'lam_mean':1e-2, 'lam_std':1e-2}
 
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
@@ -326,7 +322,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     USE_DEMO = True
     PRETRAIN_MANAGER = True
     USE_PRETRAINED_MANAGER = True
-    DATA_LOAD_STEP = 50000
+    DATA_LOAD_STEP = 40000
     high_pretrain_steps = int(5E4) 
     high_pretrain_save_freq = int(1e4)
 
@@ -539,10 +535,14 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         step_hi_ops = {'q_ops': step_hi_q_ops, 'pi_ops':step_hi_pi_ops}
     
         # merge ops for controller
-        step_lo_ops = [pi_loss_lo, q1_loss_lo, q2_loss_lo, tf.reduce_mean(q1_lo), tf.reduce_mean(q2_lo), logp_pi_lo, 
-        train_pi_lo_op, train_q_lo_op, target_update_lo]
+        # step_lo_ops = [pi_loss_lo, q1_loss_lo, q2_loss_lo, tf.reduce_mean(q1_lo), tf.reduce_mean(q2_lo), logp_pi_lo, 
+        # train_pi_lo_op, train_q_lo_op, target_update_lo]
+
+        step_lo_q_ops = [q1_loss_lo, q2_loss_lo, tf.reduce_mean(q1_lo), tf.reduce_mean(q2_lo), train_q_lo_op]
+        step_lo_pi_ops = [pi_loss_lo, logp_pi_lo, train_pi_lo_op, target_update_lo] # updates in delayed manner
         alpha_lo_op = [train_alpha_lo_op, alpha_lo] # monitor alpha_lo
-        step_lo_ops +=alpha_lo_op
+        step_lo_pi_ops +=alpha_lo_op
+        step_lo_ops = {'q_ops': step_lo_q_ops, 'pi_ops':step_lo_pi_ops}
 
     # Initializing targets to match main variables
     with tf.name_scope('init_networks'):
@@ -665,13 +665,14 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             necessary phs for low-level policy :
                 stt_ph, obs_ph, sg_ph, stt1_ph, obs1_ph, sg1_ph, act_ph, rew_ph_lo, dn_ph        
         fed train_ops :
-            [pi_loss_lo, q1_loss_lo, q2_loss_lo, tf.reduce_mean(q1_lo), tf.reduce_mean(q2_lo), logp_pi_lo, 
-                train_pi_lo_op, train_q_lo_op, target_update_lo]
-            + [train_alpha_lo_op, alpha_lo] # monitor alpha_lo
+            step_lo_q_ops = [q1_loss_lo, q2_loss_lo, tf.reduce_mean(q1_lo), tf.reduce_mean(q2_lo), train_q_lo_op]
+            step_lo_pi_ops = [pi_loss_lo, logp_pi_lo, train_pi_lo_op, target_update_lo] # updates in delayed manner
+            alpha_lo_op = [train_alpha_lo_op, alpha_lo] # monitor alpha_lo
+             {'q_ops': step_lo_q_ops, 'pi_ops':step_lo_pi_ops}
         TODO: check for the placeholders for train_alpha_op
         """
         rospy.logwarn("Now trains the low-level controller for %d timesteps", ep_len)
-        controller_ops = train_ops
+        # controller_ops = train_ops
         _ctrl_buffer = buffer
         idx = 0
         for itr in tqdm(range(ep_len)):
@@ -689,17 +690,23 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                          rew_ph_lo: (batch['rews']),
                          dn_ph: batch['done'],
                         }
+            q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
+            pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
             # low_outs = sess.run(controller_ops + monitor_lo_ops, ctrl_feed_dict)
-            low_outs = sess.run(controller_ops +[ctrl_pi_summary, ctrl_q1_summary, ctrl_q2_summary], ctrl_feed_dict)
-            # logging
+            q_lo_outs = sess.run(q_ops +[ctrl_q1_summary, ctrl_q2_summary], ctrl_feed_dict)
+            # logging TODO :implement delayed updade of the low-level controller
+            if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
+                pi_lo_outs = sess.run(pi_ops + [ctrl_pi_summary], ctrl_feed_dict)
+                # summary_writer.add_summary(pi_hi_outs[-1] , cur_step) # low-pi summary
+                wandb.log({'policy_loss_lo': pi_lo_outs[0], 'entropy_lo': -pi_lo_outs[1], 'alpha': pi_lo_outs[-2]})   
             if itr % 10 == 0:
-                wandb.log({'policy_loss_lo': low_outs[0], 'q1_loss_lo': low_outs[1],
-                            'q2_loss_lo': low_outs[2], 'q1_lo': low_outs[3], 
-                            'q2_lo': low_outs[4], 'alpha': low_outs[10], 'global_step': cur_step})
+                wandb.log({ 'q1_loss_lo': q_lo_outs[0],
+                            'q2_loss_lo': q_lo_outs[1], 'q1_lo': q_lo_outs[2], 
+                            'q2_lo': q_lo_outs[3], 'global_step': cur_step})
 
-        summary_writer.add_summary(low_outs[-3], step) # low-pi summary
-        summary_writer.add_summary(low_outs[-2], step) # low-q1 summary
-        summary_writer.add_summary(low_outs[-1], step) # low-q2 summary
+        summary_writer.add_summary(pi_lo_outs[-1], step) # low-pi summary
+        summary_writer.add_summary(q_lo_outs[-2], step) # low-q1 summary
+        summary_writer.add_summary(q_lo_outs[-1], step) # low-q2 summary
 
     def off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=100, discount=gamma, polyak=polyak):
         """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
@@ -1053,6 +1060,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             action = sample_action(act_dim) # a_t
         else:
             action = get_action(c_obs, subgoal, deterministic= not train_indicator) # a_t
+            # action = get_action(c_obs, subgoal, deterministic= train_indicator) # a_t
             # TODO: make action on the gripper as categorical policy
             # action[-1] = reloc_rescale_gripper(action[-1])
         ep_len += 1 # ep_len should be here!
