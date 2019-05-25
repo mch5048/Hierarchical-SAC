@@ -325,8 +325,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # model save/load
     USE_DEMO = True
     PRETRAIN_MANAGER = True
-    USE_PRETRAINED_MANAGER = False
-    DATA_LOAD_STEP = 20000
+    USE_PRETRAINED_MANAGER = True
+    DATA_LOAD_STEP = 50000
     high_pretrain_steps = int(5E4) 
     high_pretrain_save_freq = int(1e4)
 
@@ -461,15 +461,15 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # define operations for training low-level policy : SAC
     with tf.variable_scope('controller'):
         with tf.variable_scope('main'):
-            mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, q2_pi_lo, _, _, reg_losses = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
+            # mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, pi_g, {'preact_reg':preact_reg, 'std_reg':std_reg}
+            mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, _, _, reg_losses = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
             log_alpha_lo = tf.get_variable(name='log_alpha', initializer=-1.0, dtype=np.float32)
             alpha_lo = tf.exp(log_alpha_lo) 
 
         # Target value network
         with tf.variable_scope('target'):
             # _, _, _, _, _, _, _, v_targ_lo, _, _  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
-            _, _, _, _, _, _, q1_pi_lo_targ, q2_pi_lo_targ, _, _  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
-
+            _, _, _, _, _,  q1_pi_lo_targ, q2_pi_lo_targ,  _, _ = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
         with tf.name_scope('pi_loss_lo'):
             pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
             # pi_l2_loss_lo = tf.losses.get_regularization_loss()
@@ -673,6 +673,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         rospy.logwarn("Now trains the low-level controller for %d timesteps", ep_len)
         controller_ops = train_ops
         _ctrl_buffer = buffer
+        idx = 0
         for itr in tqdm(range(ep_len)):
             cur_step = step - ep_len + itr
             batch = _ctrl_buffer.sample_batch(batch_size)
@@ -825,9 +826,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         TODO: check if tensorboard logging is valid here. 
         """
         if USE_PRETRAINED_MANAGER:
-            os.chdir(catkin_path)
-            new_saver = tf.train.import_meta_graph(os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
-            new_saver.restore(sess, os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt-{0}'.format(DATA_LOAD_STEP))
+            # os.chdir(catkin_path)
+            new_saver = tf.train.import_meta_graph('/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
+            new_saver.restore(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt-{0}'.format(DATA_LOAD_STEP))
         else:
             rospy.logwarn("Pre-trains the high-level controller for %d timesteps", pretrain_steps)
             _demo_buffer = demo_buffer
@@ -847,11 +848,11 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
                 pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
                 _ = sess.run(q_ops, man_feed_dict)
-                if itr + 1 % delayed_update_freq == 0: # delayed update of the policy and target nets.
+                if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
                     _ = sess.run(pi_ops, man_feed_dict)
-                if itr + 1 % high_pretrain_save_freq == 0:
+                if (itr + 1)  % high_pretrain_save_freq == 0:
                     rospy.loginfo('##### saves manager_pretrain weights ##### for step %d', itr + 1)
-                    saver.save(sess,os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt', global_step=itr + 1)
+                    saver.save(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt', global_step=itr + 1)
                     saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac_pretrain.ckpt'), global_step=itr + 1)
             
     def normalize_observation(meas_stt=None, c_obs=None, aux_stt=None, act=None):
@@ -872,7 +873,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             act[:] = normalize(act[:], summary_manager.a_t_rms)
             return act
         elif aux_stt is not None:
-            print (aux_stt.shape)
             aux_stt[:, :3] = normalize(aux_stt[:, :3], summary_manager.s_t6_rms) # obj_pos
             aux_stt[:, 3:] = normalize(aux_stt[:, 3:], summary_manager.s_t5_rms) # ee_pose 
             return aux_stt
@@ -988,8 +988,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     else: # test
         rospy.logwarn('Now loads the pretrained weight for test')
         load_rms()    
-        new_saver = tf.train.import_meta_graph(os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
-        new_saver.restore(sess, os.getcwd()+'/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}'.format(DATA_LOAD_STEP))
+        new_saver = tf.train.import_meta_graph('/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
+        new_saver.restore(sess, '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}'.format(DATA_LOAD_STEP))
     # Main loop: collect experience in env and update/log each epoch
     while not rospy.is_shutdown() and t < int(total_steps):
 
@@ -1056,7 +1056,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # TODO: make action on the gripper as categorical policy
             # action[-1] = reloc_rescale_gripper(action[-1])
         ep_len += 1 # ep_len should be here!
-        
+        t +=1
+        timesteps_since_manager += 1
+        timesteps_since_subgoal += 1
+
         next_obs, manager_reward, done = env.step(action, time_step=ep_len) # reward R_t-> for high-level manager -> for sum(R_t:t+c-1)
         if train_indicator:
             randomize_world()
@@ -1069,7 +1072,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         done = False if ep_len== max_ep_len else done
         if done:
             rospy.logwarn('=============== Now epsiode %d ends with done signal! ====================', episode_num)
-        next_meas_stt = np.concatenate(next_obs['observation']['full_state'], axis=0) # s_t
+        next_meas_stt = np.concatenate(next_obs['observation']['meas_state'], axis=0) # s_t
         next_c_obs = next_obs['observation']['color_obs'] #o_t
         next_aux_stt = np.concatenate(next_obs['observation']['auxiliary'], axis=0) # s_aux
         next_full_stt = np.concatenate([next_meas_stt, next_aux_stt], axis=0) 
@@ -1102,10 +1105,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         full_stt = next_full_stt
 
         # update logging steps
-        ep_len += 1
-        t +=1
-        timesteps_since_manager += 1
-        timesteps_since_subgoal += 1
+
 
         if train_indicator:        
             if timesteps_since_subgoal % manager_propose_freq == 0:
@@ -1119,7 +1119,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 
                 # intentional seq appending is not required here since it always satisfies c step.
                 manager_buffer.store(*manager_temp_transition)
-                subgoal = get_subgoal(full_stt, des_goal) # action_dim = (1, stt_dim) -> defaults to 25-dim
+                subgoal = get_subgoal(meas_stt) # action_dim = (1, stt_dim) -> defaults to 25-dim
                 _subgoal_noise = subgoal_noise() # random sample when called
                 subgoal += _subgoal_noise
                 # Create a high level transition : note that the action of manager policy is subgoal

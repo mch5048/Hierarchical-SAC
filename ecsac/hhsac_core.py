@@ -300,7 +300,7 @@ def cnn_controller_actor_critic(meas_stt, obs, goal, act, aux_stt, action_space=
     with tf.variable_scope('q2', reuse=True):
         q2_pi = vf_mlp(tf.concat([meas_stt, aux_stt, goal, pi], axis=-1))
 
-    return mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, _, pi_g, {'preact_reg':preact_reg, 'std_reg':std_reg}
+    return mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, pi_g, {'preact_reg':preact_reg, 'std_reg':std_reg}
 
 
 # def cnn_controller_actor_critic(stt, obs, goal, act, aux, action_space=None, hidden_sizes=(512,256,256), activation=tf.nn.relu, 
