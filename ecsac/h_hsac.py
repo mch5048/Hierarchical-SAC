@@ -321,9 +321,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # model save/load
     USE_DEMO = True
     PRETRAIN_MANAGER = True
-    USE_PRETRAINED_MANAGER = True
-    DATA_LOAD_STEP = 40000
-    high_pretrain_steps = int(5E4) 
+    USE_PRETRAINED_MANAGER = False
+    DATA_LOAD_STEP = 30000
+    high_pretrain_steps = int(4e4) 
     high_pretrain_save_freq = int(1e4)
 
     IS_TRAIN = train_indicator
@@ -470,9 +470,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
             # pi_l2_loss_lo = tf.losses.get_regularization_loss()
             # pi_loss_lo += pi_l2_loss_lo
-            pi_loss_lo += reg_losses['preact_reg']*reg_param['lam_mean']  # regularization losses for the actor
-            pi_loss_lo += reg_losses['std_reg']*reg_param['lam_std']
-
+            pi_loss_lo += reg_losses['preact_reg'] # regularization losses for the actor
+            pi_loss_lo += reg_losses['std_reg']
         with tf.name_scope('q_loss_lo'):
             # the original v ftn is not trained by minimizing the MSBE -> learned by the connection between Q and V
             # Legacy : min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
@@ -529,7 +528,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
     # merge ops for manager
     with tf.name_scope('wandb_log'):
-        step_hi_q_ops = [tf.reduce_mean(q1_hi), tf.reduce_mean(q2_hi), q1_loss_hi, q2_loss_hi, q_loss_hi, 
+        step_hi_q_ops = [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, 
                         train_q_hi_op]
         step_hi_pi_ops = [pi_loss_hi, train_pi_hi_op, target_update_hi]
         step_hi_ops = {'q_ops': step_hi_q_ops, 'pi_ops':step_hi_pi_ops}
@@ -538,7 +537,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # step_lo_ops = [pi_loss_lo, q1_loss_lo, q2_loss_lo, tf.reduce_mean(q1_lo), tf.reduce_mean(q2_lo), logp_pi_lo, 
         # train_pi_lo_op, train_q_lo_op, target_update_lo]
 
-        step_lo_q_ops = [q1_loss_lo, q2_loss_lo, tf.reduce_mean(q1_lo), tf.reduce_mean(q2_lo), train_q_lo_op]
+        step_lo_q_ops = [q1_loss_lo, q2_loss_lo, q1_lo, q2_lo, train_q_lo_op]
         step_lo_pi_ops = [pi_loss_lo, logp_pi_lo, train_pi_lo_op, target_update_lo] # updates in delayed manner
         alpha_lo_op = [train_alpha_lo_op, alpha_lo] # monitor alpha_lo
         step_lo_pi_ops +=alpha_lo_op
@@ -698,15 +697,18 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
                 pi_lo_outs = sess.run(pi_ops + [ctrl_pi_summary], ctrl_feed_dict)
                 # summary_writer.add_summary(pi_hi_outs[-1] , cur_step) # low-pi summary
-                wandb.log({'policy_loss_lo': pi_lo_outs[0], 'entropy_lo': -pi_lo_outs[1], 'alpha': pi_lo_outs[-2]})   
+                wandb.log({'policy_loss_lo': pi_lo_outs[0], 'entropy_lo': -np.mean(pi_lo_outs[1]), 'alpha': pi_lo_outs[-2]})   
             if itr % 10 == 0:
-                wandb.log({ 'q1_loss_lo': q_lo_outs[0],
-                            'q2_loss_lo': q_lo_outs[1], 'q1_lo': q_lo_outs[2], 
-                            'q2_lo': q_lo_outs[3], 'global_step': cur_step})
+                # wandb.log({ 'q1_loss_lo': q_lo_outs[0],
+                #             'q2_loss_lo': q_lo_outs[1], 'q1_lo': q_lo_outs[2], 
+                #             'q2_lo': q_lo_outs[3], 'global_step': cur_step})
+                wandb.log({ 'q1_loss_lo': q_lo_outs[0], 'q2_loss_lo': q_lo_outs[1],'global_step': cur_step})                           
 
         summary_writer.add_summary(pi_lo_outs[-1], step) # low-pi summary
         summary_writer.add_summary(q_lo_outs[-2], step) # low-q1 summary
         summary_writer.add_summary(q_lo_outs[-1], step) # low-q2 summary
+        logger.store(Q1_lo=q_lo_outs[2], Q2_lo=q_lo_outs[3], Alpha_lo=pi_lo_outs[-2], Entropy_lo=-pi_lo_outs[1])                        
+
 
     def off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=100, discount=gamma, polyak=polyak):
         """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
@@ -823,9 +825,11 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 pi_hi_outs = sess.run(pi_ops + [man_pi_summary], man_feed_dict)
                 summary_writer.add_summary(pi_hi_outs[-1] , cur_step) # low-pi summary
                 wandb.log({'policy_loss_hi': pi_hi_outs[0]})       
-        wandb.log({'q1_hi': q_hi_outs[0], 'q2_hi': q_hi_outs[1], 'q1_loss_hi': q_hi_outs[2],
-                    'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'global_step': step})
+        # wandb.log({'q1_hi': q_hi_outs[0], 'q2_hi': q_hi_outs[1], 'q1_loss_hi': q_hi_outs[2],
+        #             'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'global_step': step})
+        wandb.log({'q1_loss_hi': q_hi_outs[2],'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'global_step': step})
         rospy.loginfo('writes summary of high-level value-ftn')
+        logger.store(Q1_lo=q_hi_outs[0], Q2_lo=q_hi_outs[1], Alpha_lo=pi_hi_outs[-2], Entropy_lo=-pi_hi_outs[1])     
         summary_writer.add_summary(q_hi_outs[-1] , step) # low-q summary
 
     def pretrain_manager(demo_buffer, pretrain_steps, train_ops, batch_size=batch_size):
@@ -980,7 +984,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     else:
         subgoal_noise = OU(mu=np.zeros(sub_goal_dim), sigma=noise_stddev*np.ones(sub_goal_dim))
 
-    start_time = time.time()
+    
     ep_ret, ep_len = 0, 0
     total_steps = steps_per_epoch * epochs # total interaction steps in terms of training.
     t = 0 # counted steps [0:total_steps - 1]
@@ -998,6 +1002,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         new_saver = tf.train.import_meta_graph('/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
         new_saver.restore(sess, '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}'.format(DATA_LOAD_STEP))
     # Main loop: collect experience in env and update/log each epoch
+    start_time = time.time()
     while not rospy.is_shutdown() and t < int(total_steps):
 
         if done or ep_len== max_ep_len: # if an episode is finished (no matter done==True)
@@ -1028,8 +1033,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                         manager_temp_transition[3].append(action) # a_seq
                 # buffer store arguments : s_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done 
                 manager_buffer.store(*manager_temp_transition) # off policy correction is done inside the manager_buffer 
-
                 save_rms(step=t)
+            logger.stpre(EpRet=ep_ret, Eplen=ep_len) # TODO : implement this
             # reset the environment since an episode has been finished
             obs = env.reset() # observation = {'meas_state': ,'auxiliary': ,'color_obs':}
             done = False
@@ -1140,17 +1145,33 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 saver.save(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
                 saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac.ckpt'), global_step=t)  
 
+            if t > 0 and t % steps_per_epoch == 0:
+                # Loggers for experimental result section of Master's thesis
+                # epoch information.
+                # TODO : check the sanity!
+                epoch = t // steps_per_epoch
+                logger.log_tabular('Epoch', epoch)
+                logger.log_tabular('EpRet', with_min_and_max=True)
+                logger.log_tabular('EpLen', average_only=True)
+                logger.log_tabular('Cumulative steps',t)
+                logger.log_tabular('Entropy_lo', with_min_and_max=True)
+                logger.log_tabular('Alpha_lo', with_min_and_max=True)
+                logger.log_tabular('Q1_hi', with_min_and_max=True) 
+                logger.log_tabular('Q2_hi', with_min_and_max=True)
+                logger.log_tabular('Q1_lo', with_min_and_max=True) 
+                logger.log_tabular('Q2_lo', with_min_and_max=True)
+                logger.log_tabular('Time', time.time()-start_time)
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--env', type=str, default='Saywyer_PickAndPlace_v0')
     parser.add_argument('--hid', type=int, default=300)
     parser.add_argument('--l', type=int, default=1)
     parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--seed', '-s', type=int, default=0)
+    parser.add_argument('--seed', '-s', type=int, default=777)
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--exp_name', type=str, default='sac')
+    parser.add_argument('--exp_name', type=str, default='h_hsac_pick_and_place')
     args = parser.parse_args()
 
     from utils.run_utils import setup_logger_kwargs
