@@ -207,7 +207,6 @@ Added hierarchical learning + learnable temperature (alpha).
 def td_target(reward, discount, next_value):
     return reward + discount * next_value
 
-''
 def assert_shape(tensor, expected_shape):
     tensor_shape = tensor.shape.as_list()
     assert len(tensor_shape) == len(expected_shape)
@@ -215,25 +214,21 @@ def assert_shape(tensor, expected_shape):
 
 
 def randomize_world():
-
-    # We first wait for the service for RandomEnvironment change to be ready
-    # rospy.loginfo("Waiting for service /dynamic_world_service to be ready...")
+    """Call the domain_randomization ROS service from the plugin
+    """
     rospy.wait_for_service('/dynamic_world_service')
     # rospy.loginfo("Service /dynamic_world_service READY")
     dynamic_world_service_call = rospy.ServiceProxy('/dynamic_world_service', Empty)
     change_env_request = EmptyRequest()
-
     dynamic_world_service_call(change_env_request)
 
 def colorize_world():
-
-    # We first wait for the service for RandomEnvironment change to be ready
-    # rospy.loginfo("Waiting for service /dynamic_world_service to be ready...")
+    """Call the domain_randomization ROS service from the plugin
+    """
     rospy.wait_for_service('/colorize_world_service')
     # rospy.loginfo("Service /dynamic_world_service READY")
     dynamic_world_service_call = rospy.ServiceProxy('/dynamic_world_service', Empty)
     change_env_request = EmptyRequest()
-
     dynamic_world_service_call(change_env_request)
 
 
@@ -264,8 +259,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # general hyper_params
     seed=0 
     # epoch : in terms of training nn
-    steps_per_epoch=4000
-    epochs=100
+    steps_per_epoch=2000
+    epochs=300
     save_freq = 2e3 # every 2000 steps (2 epochs)
     gamma=0.99 # for both hi & lo level policies
     polyak=0.995 # tau = 0.005
@@ -291,7 +286,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     reward_scale_lo = 1.0
 
     # coefs for nn ouput regularizers
-    reg_param = {'lam_mean':1e-2, 'lam_std':1e-2}
+    reg_param = {'lam_mean':5e-1, 'lam_std':5e-1}
 
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
@@ -321,8 +316,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # model save/load
     USE_DEMO = True
     PRETRAIN_MANAGER = True
-    USE_PRETRAINED_MANAGER = False
-    DATA_LOAD_STEP = 30000
+    USE_PRETRAINED_MANAGER = True
+    DATA_LOAD_STEP = 40000
     high_pretrain_steps = int(4e4) 
     high_pretrain_save_freq = int(1e4)
 
@@ -470,8 +465,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
             # pi_l2_loss_lo = tf.losses.get_regularization_loss()
             # pi_loss_lo += pi_l2_loss_lo
-            pi_loss_lo += reg_losses['preact_reg'] # regularization losses for the actor
-            pi_loss_lo += reg_losses['std_reg']
+            pi_loss_lo += reg_losses['preact_reg'] * reg_param['lam_mean'] # regularization losses for the actor
+            pi_loss_lo += reg_losses['std_reg'] * reg_param['lam_std']
         with tf.name_scope('q_loss_lo'):
             # the original v ftn is not trained by minimizing the MSBE -> learned by the connection between Q and V
             # Legacy : min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
@@ -829,7 +824,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         #             'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'global_step': step})
         wandb.log({'q1_loss_hi': q_hi_outs[2],'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'global_step': step})
         rospy.loginfo('writes summary of high-level value-ftn')
-        logger.store(Q1_lo=q_hi_outs[0], Q2_lo=q_hi_outs[1], Alpha_lo=pi_hi_outs[-2], Entropy_lo=-pi_hi_outs[1])     
+        logger.store(Q1_hi=q_hi_outs[0], Q2_hi=q_hi_outs[1])     
         summary_writer.add_summary(q_hi_outs[-1] , step) # low-q summary
 
     def pretrain_manager(demo_buffer, pretrain_steps, train_ops, batch_size=batch_size):
@@ -1013,7 +1008,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 # train high-level manager policy in delayed manner.
                 if timesteps_since_manager >= train_manager_freq:
                     timesteps_since_manager = 0
-                    train_high_level_manager(train_ops=step_hi_ops, buffer=manager_buffer, ep_len=int(ep_len/train_manager_freq), step=t)
+                    train_high_level_manager(train_ops=step_hi_ops, buffer=manager_buffer, ep_len=int(ep_len/train_manager_freq/2), step=t)
 
                 # Process final state/obs, store manager transition i.e. state/obs @ t+c
                 if len(manager_temp_transition[3]) != 1: # if not terminal state -> no next state will be observed
@@ -1034,7 +1029,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 # buffer store arguments : s_seq, o_seq, a_seq, obs, obs_1, dg, dg_1, stt, stt_1, act, aux, aux_1, rew, done 
                 manager_buffer.store(*manager_temp_transition) # off policy correction is done inside the manager_buffer 
                 save_rms(step=t)
-            logger.stpre(EpRet=ep_ret, Eplen=ep_len) # TODO : implement this
+            logger.store(EpRet=ep_ret, EpLen=ep_len) # TODO : implement this
             # reset the environment since an episode has been finished
             obs = env.reset() # observation = {'meas_state': ,'auxiliary': ,'color_obs':}
             done = False
@@ -1145,7 +1140,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 saver.save(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
                 saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac.ckpt'), global_step=t)  
 
-            if t > 0 and t % steps_per_epoch == 0:
+            if t > 0 and t % int(steps_per_epoch) == 0:
                 # Loggers for experimental result section of Master's thesis
                 # epoch information.
                 # TODO : check the sanity!
@@ -1161,6 +1156,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 logger.log_tabular('Q1_lo', with_min_and_max=True) 
                 logger.log_tabular('Q2_lo', with_min_and_max=True)
                 logger.log_tabular('Time', time.time()-start_time)
+                logger.dump_tabular()
 
 if __name__ == '__main__':
     import argparse
