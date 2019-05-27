@@ -10,6 +10,7 @@ import time
 from time import sleep
 from intera_core_msgs.msg import JointCommand
 from geometry_msgs.msg import Pose, Point, Quaternion
+from utils.common import rate_limited
 # control modes
 POSITION_MODE = 1
 VELOCITY_MODE = 2
@@ -29,7 +30,7 @@ GRIPPER_LOWER = 0.0
 
 TERM_THRES = 50
 SUC_THRES = 50
-
+CTRL_PERIOD = 70
 
 
 class demoEnv(robotEnv): 
@@ -68,6 +69,7 @@ class demoEnv(robotEnv):
     def reset_demo(self):
         """Reset the environment for demo collection episodes.
             same functionality as "reset" method.
+            'desired goal' has been deprecated
         """
         # Desired goal is given here.
         # Should wait until reset finishes.
@@ -85,15 +87,16 @@ class demoEnv(robotEnv):
         _gripper_pos = self.get_gripper_position()
         _ee_pose = self.get_end_effector_pose()
         obs = dict()
-        obs['full_state'] = [_joint_pos, _joint_vels, _joint_effos] # default observations
+        obs['meas_state'] = [_joint_pos, _joint_vels, _joint_effos] # default observations
+        obs['auxiliary'] = [_targ_obj_obs] # default observations
         if self.isGripper:
-            obs['full_state'].append([_gripper_pos])
+            obs['meas_state'].append([_gripper_pos])
         if self.isCartesian:
-            obs['full_state'].append(_ee_pose)
+            obs['auxiliary'].append(_ee_pose)
         if self.isPOMDP:
             obs['color_obs'] = _color_obs
         rospy.set_param('vel_calc','true')
-        return {'observation': obs,'desired_goal':des_goal, 'auxiliary':_targ_obj_obs}
+        return {'observation': obs,'desired_goal':des_goal}
 
 
     def _get_demo_action(self):
@@ -112,10 +115,10 @@ class demoEnv(robotEnv):
     def grasp_object(self):
         """ Grasp the target object if reached to the target object.
         """
-        self.close_gripper()
+        self.gripper_close()
         self.control_command[-1] = float(1)
 
-
+    @rate_limited(CTRL_PERIOD)
     def step_demo(self, action=None, time_step=1000):
         """Step the environment for demo collection episodes.
             :param action:

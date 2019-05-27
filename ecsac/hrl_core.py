@@ -172,7 +172,7 @@ def cnn_gaussian_policy_with_logits(obs, act, goal, activation=tf.nn.relu, outpu
     """
     grip_dim = 2 # on/off
     act_dim = act.shape.as_list()[-1]
-    log_alpha = tf.get_variable(name='log_alpha', initializer=0.0, dtype=np.float32)
+    _ = tf.get_variable(name='log_alpha', initializer=0.0, dtype=np.float32)
     _feat = cnn_feature_extractor(obs, activation)
     _feat = tf.concat([_feat, goal], axis=-1)
     _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=kernel_initializer)
