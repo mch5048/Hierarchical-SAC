@@ -291,6 +291,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
     # encoding ?? -> rather, shouldn't it be LSTM? g 
+    # NOTE : implementation of adjusted off-policy correction
+    # alpha : pi_lo_outs[-3] sigma : pi_lo_outs[-2]
+    off_alpha = np.exp(-1)
+    off_log_std = np.exp(1)
 
 
     # wandb
@@ -317,8 +321,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     USE_DEMO = True
     PRETRAIN_MANAGER = True
     USE_PRETRAINED_MANAGER = True
-    DATA_LOAD_STEP = 40000
-    high_pretrain_steps = int(4e4) 
+    DATA_LOAD_STEP = 30000
+    high_pretrain_steps = int(3e4) 
     high_pretrain_save_freq = int(1e4)
 
     IS_TRAIN = train_indicator
@@ -433,12 +437,12 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             
             train_pi_hi_op = tf.contrib.layers.optimize_loss(
                 pi_loss_hi, global_step=None, learning_rate=pi_lr, optimizer=pi_hi_optimizer, variables=get_vars('manager/main/pi'),
-                increment_global_step=False, summaries=("gradients", "gradient_norm", "global_gradient_norm"), name='pi_hi_opt')
+                increment_global_step=False, clip_gradients=20.0, summaries=("gradients", "gradient_norm", "global_gradient_norm"), name='pi_hi_opt')
 
             with tf.control_dependencies([train_pi_hi_op]): # expreimental application on high-level policy's learning in TD3.
                 train_q_hi_op = tf.contrib.layers.optimize_loss(
                     q_loss_hi, global_step=None, learning_rate=pi_lr, optimizer=q_hi_optimizer, variables=get_vars('manager/main/q'),
-                    increment_global_step=False, summaries=("gradients", "gradient_norm", "global_gradient_norm"), name='q_hi_opt')
+                    increment_global_step=False, clip_gradients=20.0, summaries=("gradients", "gradient_norm", "global_gradient_norm"), name='q_hi_opt')
 
             with tf.control_dependencies([train_q_hi_op]): # train_qfs 
                 with tf.name_scope('polyak_hi_update'):
@@ -453,20 +457,22 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     with tf.variable_scope('controller'):
         with tf.variable_scope('main'):
             # mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, pi_g, {'preact_reg':preact_reg, 'std_reg':std_reg}
-            mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, _, _, reg_losses = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
+            mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, _, _, reg_losses, state_infer, std_lo = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
             log_alpha_lo = tf.get_variable(name='log_alpha', initializer=-1.0, dtype=np.float32)
             alpha_lo = tf.exp(log_alpha_lo) 
 
         # Target value network
         with tf.variable_scope('target'):
             # _, _, _, _, _, _, _, v_targ_lo, _, _  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
-            _, _, _, _, _,  q1_pi_lo_targ, q2_pi_lo_targ,  _, _ = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
+            _, _, _, _, _,  q1_pi_lo_targ, q2_pi_lo_targ,  _, _, _, _ = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
         with tf.name_scope('pi_loss_lo'):
             pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
             # pi_l2_loss_lo = tf.losses.get_regularization_loss()
             # pi_loss_lo += pi_l2_loss_lo
             pi_loss_lo += reg_losses['preact_reg'] * reg_param['lam_mean'] # regularization losses for the actor
             pi_loss_lo += reg_losses['std_reg'] * reg_param['lam_std']
+            state_infer_loss_lo = tf.losses.mean_squared_error(labels=tf.concat([stt_ph, aux_ph], axis=-1), predictions=state_infer, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
+            pi_loss_lo += state_infer_loss_lo
         with tf.name_scope('q_loss_lo'):
             # the original v ftn is not trained by minimizing the MSBE -> learned by the connection between Q and V
             # Legacy : min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
@@ -498,15 +504,15 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             train_alpha_lo_op = alpha_lo_optimizer.minimize(alpha_loss_lo,var_list=[log_alpha_lo])
             train_pi_lo_op = tf.contrib.layers.optimize_loss(
                 pi_loss_lo, global_step=None, learning_rate=pi_lr, optimizer=pi_lo_optimizer, variables=get_vars('controller/main/pi'),
-                increment_global_step=False, summaries=("gradients", "gradient_norm", "global_gradient_norm"), name='pi_lo_opt')
+                increment_global_step=False, clip_gradients=20.0, summaries=("gradients", "gradient_norm", "global_gradient_norm"), name='pi_lo_opt')
 
             with tf.control_dependencies([train_pi_lo_op]): # training pi won't affect learning vf
                 train_q1_lo_op = tf.contrib.layers.optimize_loss(
                 q1_loss_lo, global_step=None, learning_rate=vf_lr, optimizer=q1_lo_optimizer, variables=get_vars('controller/main/q1'),
-                increment_global_step=False, summaries=("gradients", "gradient_norm"), name='q1_lo_opt')
+                increment_global_step=False, clip_gradients=20.0, summaries=("gradients", "gradient_norm"), name='q1_lo_opt')
                 train_q2_lo_op = tf.contrib.layers.optimize_loss(
                 q2_loss_lo, global_step=None, learning_rate=vf_lr, optimizer=q2_lo_optimizer, variables=get_vars('controller/main/q2'),
-                increment_global_step=False, summaries=("gradients", "gradient_norm"), name='q2_lo_opt')
+                increment_global_step=False, clip_gradients=20.0, summaries=("gradients", "gradient_norm"), name='q2_lo_opt')
                 train_q_lo_op = tf.group(train_q1_lo_op, train_q2_lo_op)
             # Polyak averaging for target variables
             # (control flow because sess.run otherwise evaluates in nondeterministic order)
@@ -536,6 +542,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         step_lo_pi_ops = [pi_loss_lo, logp_pi_lo, train_pi_lo_op, target_update_lo] # updates in delayed manner
         alpha_lo_op = [train_alpha_lo_op, alpha_lo] # monitor alpha_lo
         step_lo_pi_ops +=alpha_lo_op
+        step_lo_pi_ops.append(std_lo)
         step_lo_ops = {'q_ops': step_lo_q_ops, 'pi_ops':step_lo_pi_ops}
 
     # Initializing targets to match main variables
@@ -625,6 +632,16 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         raise DeprecationWarning
         # return 0.02*gripper + 0.022
 
+    def get_logp_pi(obs, sub_goal): # True for test
+        """ infer the log probability of current policy for given
+        """
+        logp_pi_op = logp_pi_lo
+        sub_goal, obs = normalize_observation(meas_stt=sub_goal.copy().reshape((-1,sub_goal_dim)), c_obs=obs.copy().reshape((-1,)+obs_dim)) # subgoal_dim = meas_dim
+        # TODO: resolve shape mismatching issue
+        return np.squeeze(sess.run(logp_pi_op, feed_dict={obs_ph: obs,
+                                           sg_ph: sub_goal}))
+
+
     def get_action(obs, sub_goal, deterministic=False): # True for test
         """ infer primitive action from low-level policy
             TODO : manage when the obs and sub_goal are batch of actions
@@ -702,8 +719,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         summary_writer.add_summary(pi_lo_outs[-1], step) # low-pi summary
         summary_writer.add_summary(q_lo_outs[-2], step) # low-q1 summary
         summary_writer.add_summary(q_lo_outs[-1], step) # low-q2 summary
-        logger.store(Q1_lo=q_lo_outs[2], Q2_lo=q_lo_outs[3], Alpha_lo=pi_lo_outs[-2], Entropy_lo=-pi_lo_outs[1])                        
-
+        logger.store(Q1_lo=q_lo_outs[2], Q2_lo=q_lo_outs[3], Alpha_lo=pi_lo_outs[-3], Entropy_lo=-pi_lo_outs[1])                        
+        off_alpha = pi_lo_outs[-3]
+        off_log_std = pi_lo_outs[-2]
 
     def off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=100, discount=gamma, polyak=polyak):
         """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
@@ -741,20 +759,20 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         _a_seq = np.array(_a_seq)
         seq_len = len(_s_seq[0])
         # flatten along the seq-dim
-        flat_batch_size = seq_len * batch_size
+        flat_batch_size = seq_len * batch_size # 10 * 32
         action_dim = _a_seq[0][0].shape
         state_dim = _s_seq[0][0].shape # except for the auxiliary observation
         obs_dim = _o_seq[0][0].shape # since the shape is (batch, seq_len,) + shape
         ncands = candidates.shape[1] # 10          
         #     # for off_policy correction, we need 
         #     # s_t:t+c-1
-        rollout_actions = _a_seq.reshape((flat_batch_size,) + action_dim) #pi_lo actions from rollout
-        states = _s_seq.reshape((flat_batch_size,) + state_dim) 
+        rollout_actions = _a_seq.reshape((flat_batch_size,) + action_dim) #  for i in batch [a_1;t:t+c-1 || a_2;t:t+c-1 || ...]
+        _ = _s_seq.reshape((flat_batch_size,) + state_dim) 
         observations = _o_seq.reshape((flat_batch_size,) + obs_dim)
         # shape of the np.array 'observations' -> (flat_batch_size, 24)
         # shape of the np.array 'batched_candidiates[i]' -> (flat_batch_size, 24)
         batched_candidates = np.tile(candidates, [seq_len, 1, 1]) # candidate goals
-        batched_candidates= batched_candidates.transpose(1,0,2)
+        batched_candidates = batched_candidates.transpose(1,0,2)
         pi_lo_actions = np.zeros((ncands, flat_batch_size) + action_dim) # shape (10, flat_batch_size, 8)
         # for which goal the new low policy would have taken the same action as the old one?
         # TODO: debug the shape for the batch action estimations
@@ -773,6 +791,75 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         diff_norm = np.linalg.norm(diff_tr, axis=-1) # shape (batch_size, n_cands, seq_len)-> ||ai - mu_lo(si,gi_tilde)||_2
         log_prob = -0.5*np.sum(diff_norm**2, axis=-1) # sum along the seq_len (10)
         max_indicies = np.argmax(log_prob, axis=-1) # argmax along the n_cands -> batch of goals having the most log_prob
+        # shape of max_indices ->(batch_size,) -> index along 10 candidates for each batch
+        # shape of the candidates (batch, n_cands, goal_dim)
+        return candidates[np.arange(batch_size),max_indicies] # [for each batch, max index]
+
+    def new_off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=100, discount=gamma, polyak=polyak):
+        """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
+        e.g. shape = (batch_size, seq, state_dim)
+        we need additional o_seq to generate actions from low-level policy
+        """
+        rospy.loginfo("Now we apply off-policy correciton")
+        _s_seq = s_seq
+        _o_seq = o_seq
+        _a_seq = a_seq
+        _candidate_goals = candidate_goals
+        _subgoals = subgoals # batch of g_t
+        first_states = [s[0] for s in _s_seq] # s_t
+        last_states = [s[-1] for s in _s_seq] # s_t+c note that  the length of state seq is c+1
+        first_obs = [o[0] for o in _o_seq] # o_t
+        last_obs = [o[-1] for o in _o_seq] # o_t+c
+        diff_goal = (np.array(last_states)-np.array(first_states))[:,np.newaxis,:] # s_t
+        original_goal = np.array(subgoals)[:, np.newaxis, :] 
+        random_goals = np.random.normal(loc=diff_goal, scale= off_alpha * off_log_std, size=(batch_size, _candidate_goals, original_goal.shape[-1])) # gaussian centered @ s_t+c - s_t
+        # TODO : modify the random goal samping 190525
+        # shape (batch_size, 10, subgoal_dim)
+        candidates = np.concatenate([original_goal, diff_goal, random_goals], axis=1)
+
+        # should define what is 'subgoal'?
+        # off-policy correction here.
+        # candidtate goals from argument.
+
+        og_shape = original_goal.shape
+        # loc 
+        random_goals = np.random.normal(loc=diff_goal, size=(batch_size, candidate_goals, original_goal.shape[-1]) ) #loc = mean of distribution
+        rg_shape = random_goals.shape 
+        candidates = np.concatenate([original_goal, diff_goal, random_goals], axis=1)
+        _s_seq = np.array(_s_seq)[:,:-1,:] # check if s_seq has one more transition than required
+        _o_seq = np.array(_o_seq)[:,:-1,:] # check if o_seq has one more transition than required
+        _a_seq = np.array(_a_seq)
+        seq_len = len(_s_seq[0])
+        # flatten along the seq-dim
+        flat_batch_size = seq_len * batch_size # 10 * 32
+        action_dim = _a_seq[0][0].shape
+        state_dim = _s_seq[0][0].shape # except for the auxiliary observation
+        obs_dim = _o_seq[0][0].shape # since the shape is (batch, seq_len,) + shape
+        ncands = candidates.shape[1] # 10          
+        #     # for off_policy correction, we need 
+        #     # s_t:t+c-1
+        rollout_actions = _a_seq.reshape((flat_batch_size,) + action_dim) #  for i in batch [a_1;t:t+c-1 || a_2;t:t+c-1 || ...]
+        _ = _s_seq.reshape((flat_batch_size,) + state_dim) 
+        observations = _o_seq.reshape((flat_batch_size,) + obs_dim)
+        # shape of the np.array 'observations' -> (flat_batch_size, 24)
+        # shape of the np.array 'batched_candidiates[i]' -> (flat_batch_size, 24)
+        batched_candidates = np.tile(candidates, [seq_len, 1, 1]) # candidate goals
+        batched_candidates = batched_candidates.transpose(1,0,2)
+        logp_lo_actions = np.zeros((ncands, flat_batch_size)) # shape (10, 320, 1) # log_prob is reduce_summed over action-dim, 10 -> candidates
+        # for which goal the new low policy would have taken the same action as the old one?
+        # TODO: debug the shape for the batch action estimations
+        # (1000, 100, 100, 3)
+        # (10, 29)
+
+        # TODO : modify here with gaussian likelihood 190525
+        # requirements : alpha(global), log_std of the current low level policy.
+        # def gaussian_likelihood(x, mu, log_std):
+        for c in range(ncands): # one sample for each iteration?
+            logp_lo_actions[c] = get_logp_pi(observations, batched_candidates[c]) # shape (320, 1)
+        # now compute the approx. lob prob. of the policy : eq.(5) in the paper
+        logp_lo_actions.reshape((ncands, batch_size, seq_len)) # shape (ncands, batch, seq) 
+        seq_sim_logp = np.sum(logp_lo_actions, axis=-1) # shape (10, 32)
+        max_indicies = np.argmax(seq_sim_logp, axis=-1) # argmax along the n_cands -> batch of goals having the most log_prob
         # shape of max_indices ->(batch_size,) -> index along 10 candidates for each batch
         # shape of the candidates (batch, n_cands, goal_dim)
         return candidates[np.arange(batch_size),max_indicies] # [for each batch, max index]
@@ -800,7 +887,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             batch = _man_buffer.sample_batch(batch_size)
             # subgoal here is the action of manager network, action for computing log-likelihood
             # shape of corr_subgoals (batch_size, goal_dim)
-            corr_subgoals = off_policy_correction(subgoals= batch['acts'],s_seq= batch['meas_st_seq'],
+            corr_subgoals = new_off_policy_correction(subgoals= batch['acts'],s_seq= batch['meas_st_seq'],
             o_seq= batch['ot_seq'], a_seq= batch['at_seq'])
             # action of the manager is subgoal...
             man_feed_dict = {stt_ph: normalize_observation(meas_stt=batch['st']),
