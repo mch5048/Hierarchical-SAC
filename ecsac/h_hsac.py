@@ -265,9 +265,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     gamma=0.99 # for both hi & lo level policies
     polyak=0.995 # tau = 0.005
     lr=1e-3 #for both actor
-    pi_lr=3e-4
-    vf_lr=3e-4 # for all the vf, and qfs
-    alp_lr=3e-4 # for adjusting temperature
+    pi_lr=1e-4
+    vf_lr=1e-4 # for all the vf, and qfs
+    alp_lr=1e-4 # for adjusting temperature
     batch_size=100
     start_steps=5000
     max_ep_len=1000
@@ -276,17 +276,17 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     noise_idx = 1 # 0: ou 1: normal
     noise_type = "normal" if noise_idx else "ou"
     noise_stddev = 0.25
-    manager_noise = 0.1 # for target policy smoothing.
+    manager_noise = 0.05 # for target policy smoothing.
     manager_noise_clip = 0.3 # for target policy smoothing.
     man_replay_size = int(5e4) # Memory leakage?
-    delayed_update_freq = 8
+    delayed_update_freq = 3
     #controller sac
     ctrl_replay_size = int(5e4) # Memory leakage?
     target_ent = 0.01 # learnable entropy
     reward_scale_lo = 1.0
 
     # coefs for nn ouput regularizers
-    reg_param = {'lam_mean':5e-1, 'lam_std':5e-1}
+    reg_param = {'lam_mean':5e-1, 'lam_std':5e-2}
 
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
@@ -320,9 +320,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # model save/load
     USE_DEMO = True
     PRETRAIN_MANAGER = True
-    USE_PRETRAINED_MANAGER = True
-    DATA_LOAD_STEP = 30000
-    high_pretrain_steps = int(3e4) 
+    USE_PRETRAINED_MANAGER = False
+    USE_PRETRAINED_MODEL = False
+    DATA_LOAD_STEP = 54000
+    high_pretrain_steps = int(4e4) 
     high_pretrain_save_freq = int(1e4)
 
     IS_TRAIN = train_indicator
@@ -483,10 +484,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             q_backup_lo = tf.stop_gradient(rew_ph_lo + gamma*(1-dn_ph)*impl_targ_v_lo) 
             q1_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q1_lo, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q2_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q2_lo, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
-            q1_l2_loss_lo = tf.losses.get_regularization_loss()
-            q2_l2_loss_lo = tf.losses.get_regularization_loss()
-            q1_loss_lo += q1_l2_loss_lo
-            q2_loss_lo += q2_l2_loss_lo
+            # q1_l2_loss_lo = tf.losses.get_regularization_loss()
+            # q2_l2_loss_lo = tf.losses.get_regularization_loss()
+            # q1_loss_lo += q1_l2_loss_lo
+            # q2_loss_lo += q2_l2_loss_lo
 
         with tf.name_scope('alpha_loss_lo'):
             alpha_loss_lo = tf.reduce_mean(-log_alpha_lo*tf.stop_gradient(logp_pi_lo + target_ent)) # -alpha * log_p_pi - alpha * target_ent
@@ -1033,7 +1034,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     TRAIN_HIGH_LEVEL = False # DAgger should be reimplemented 
 
     episode_num = 0
-    if TRAIN_HIGH_LEVEL: 
+    if TRAIN_HIGH_LEVEL and train_indicator: 
         raise NotImplementedError
         for tr in range(high_pretrain_steps) and not rospy.is_shutdown():
             obs = env.reset() # observation = {'meas_state': ,'auxiliary': ,'color_obs':}
@@ -1044,7 +1045,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             ep_low_ret = 0 # return of the intrinsic reward for low level controller 
             episode_num += 1 # for every env.reset()
 
-    if USE_DEMO:
+    if USE_DEMO and train_indicator:
         with open(MAN_BUF_FNAME, 'rb') as f:
             rospy.logwarn('Loading demo batch on the manager buffer. May take a while...')
             _manager_batch = pickle.load(f)
@@ -1058,7 +1059,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         rospy.loginfo('Successfully loaded demo transitions on the buffers!')
 
     # back to catkin_ws to resolve directory conflict issue
-    if PRETRAIN_MANAGER:
+    if PRETRAIN_MANAGER and train_indicator:
         pretrain_manager(demo_buffer=manager_buffer, pretrain_steps=high_pretrain_steps, train_ops=step_hi_ops)
 
     if noise_type == "normal":
@@ -1077,7 +1078,11 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     reset = False
     manager_temp_transition = list() # temp manager transition
     if train_indicator: # train
-        saver.save(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
+        if USE_PRETRAINED_MODEL:
+            new_saver = tf.train.import_meta_graph('/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
+            new_saver.restore(sess, '/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt-{0}'.format(DATA_LOAD_STEP))
+        else:
+            saver.save(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac.ckpt', global_step=t)
     else: # test
         rospy.logwarn('Now loads the pretrained weight for test')
         load_rms()    
@@ -1154,7 +1159,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         t +=1
         timesteps_since_manager += 1
         timesteps_since_subgoal += 1
-
+        print ('======= action =======')
+        print (action)
         next_obs, manager_reward, done = env.step(action, time_step=ep_len) # reward R_t-> for high-level manager -> for sum(R_t:t+c-1)
         if train_indicator:
             randomize_world()

@@ -80,7 +80,7 @@ def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None, kerne
         x = (tf.layers.dense(x, units=h, activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer))
     return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer)
 
-def cnn_feature_extractor(x, activation=tf.nn.leaky_relu, kernel_regularizer=None, kernel_initializer=uniform):
+def cnn_feature_extractor(x, activation=tf.nn.relu, kernel_regularizer=None, kernel_initializer=uniform):
     x = tf.layers.conv2d(x, filters=16,kernel_size=5, strides=(3,3), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv1')
     x = tf.layers.conv2d(x, filters=32,kernel_size=3, strides=(2,2), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv2')
     x = tf.layers.conv2d(x, filters=64,kernel_size=3, strides=(2,2), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv3')
@@ -177,7 +177,8 @@ def cnn_gaussian_policy_with_logits(obs, act, goal, meas_stt, aux_stt, activatio
     state_infer = tf.layers.dense(_feat, units=full_stt_dim, activation=None, kernel_initializer=kernel_initializer)
     _feat = tf.concat([_feat, goal], axis=-1)
     _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=kernel_initializer)
-    _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=kernel_initializer)
+    _feat = tf.layers.dense(_feat, units=100, activation=activation, kernel_initializer=kernel_initializer)
+    _feat = tf.layers.dense(_feat, units=100, activation=activation, kernel_initializer=kernel_initializer)
     # logit action for controlling gripper (on/off)
     logits = tf.layers.dense(_feat, units=grip_dim, activation=activation, kernel_initializer=kernel_initializer)
     logp_g_all = tf.nn.log_softmax(logits)
@@ -235,7 +236,7 @@ Actor-Critics for manager class : mu_hi, deterministic policy
 """
 
 
-def mlp_manager_actor_critic(meas_stt, sub_goal, aux_stt, action_space=None, hidden_sizes=(200,200), activation=tf.nn.relu, 
+def mlp_manager_actor_critic(meas_stt, sub_goal, aux_stt, action_space=None, hidden_sizes=(200,200,200), activation=tf.nn.relu, 
                      output_activation=tf.tanh, policy=mlp_deterministic_policy):
     """ actor-critic for TD3
         args: 
@@ -275,7 +276,7 @@ def mlp_manager_actor_critic(meas_stt, sub_goal, aux_stt, action_space=None, hid
 Actor-Critics for controller class : mu_lo, stochastic policy
 """
 
-def cnn_controller_actor_critic(meas_stt, obs, goal, act, aux_stt, action_space=None, hidden_sizes=(400,300), activation=tf.nn.relu, 
+def cnn_controller_actor_critic(meas_stt, obs, goal, act, aux_stt, action_space=None, hidden_sizes=(300, 300, 300), activation=tf.nn.leaky_relu, 
                     output_activation=None, policy=cnn_gaussian_policy_with_logits):
     """ Define actor-critic for controller policy ; actor: cnn critic: mlp
     """
