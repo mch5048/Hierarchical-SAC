@@ -351,7 +351,8 @@ if __name__ == '__main__':
         # here, gb[-1], gb[-2], ... gb[-7] = sT in example. 
         sT = s1b[-1]
         for idx in range(1,remainder + 1):
-            gb[-idx] = sT
+            # gb[-idx] = sT
+            gb[-idx] = sT - sb[-remainder - 1]
         # 3. copy the gb into g1b, with the index offset of 1. Then the last element of g1b is sT.
         g1b[:-1] = gb[1:]
         g1b[-1] = sT
