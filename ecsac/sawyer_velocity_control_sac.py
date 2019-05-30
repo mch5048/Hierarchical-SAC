@@ -140,7 +140,7 @@ class VelocityControl(object):
         self.init_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
         self.integ_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
         self.integ_twist = PyKDL.Twist(PyKDL.Vector(0, 0, 0), PyKDL.Vector(0, 0, 0))
-        self.dist_threshold = 0.10
+        self.dist_threshold = 0.02
         # control loop
         while not rospy.is_shutdown():
             if rospy.has_param('vel_calc'):
@@ -154,7 +154,7 @@ class VelocityControl(object):
     def ref_poseCB(self, goal_pose): # Takes target pose, returns ref se3
         rospy.logdebug("ref_pose_cb called in velocity_control.py")
         # p = np.array([some_pose.position.x, some_pose.position.y, some_pose.position.z])
-        p = np.array([goal_pose.position.x, goal_pose.position.y + 0.04, goal_pose.position.z])
+        p = np.array([goal_pose.position.x, goal_pose.position.y + 0.1, goal_pose.position.z])
         quat = np.array([goal_pose.orientation.x, goal_pose.orientation.y, goal_pose.orientation.z, goal_pose.orientation.w])
         goal_tmp = tr.compose_matrix(angles=tr.euler_from_quaternion(quat, 'sxyz'), translate=p) # frame is spatial 'sxyz', return Euler angle from quaternion for specified axis sequence.
         with self.mutex:
@@ -199,13 +199,14 @@ class VelocityControl(object):
         X_current = self._get_tf_matrix(current_pose)
         X_goal = self.original_goal
         X_goal[2][3] += 0.01
+        X_goal[1][3] += 0.02
         rospy.logwarn('=============== Current pose ===============')
         print (X_current)
         rospy.logwarn('=============== Goal goal ===============')
         print (X_goal)
         # Tf = self.plan_time
         Tf = np.random.uniform(self.rand_plan_min, self.rand_plan_max)
-        N = int(Tf / dt) # ex: plantime = 7, dt = 0.01 -> N = 700
+        N = int( Tf / dt) # ex: plantime = 7, dt = 0.01 -> N = 700
         self.num_wp = N
         # self.traj_list = r.CartesianTrajectory(X_current, X_goal, Tf=Tf, N=N, method=CUBIC)
         self.traj_list = r.ScrewTrajectory(X_current, X_goal, Tf=Tf, N=N, method=QUINTIC)
@@ -565,7 +566,7 @@ class VelocityControl(object):
 
 
     def apply_gain(self, prop_err, integ_err):
-        Kp = 1.0
+        Kp = 5.0
         Ki = 0.0
         return Kp * prop_err, Ki * integ_err
 
@@ -614,8 +615,8 @@ class VelocityControl(object):
         # rospy.logwarn('=============== Twist integrated ===============')
         # print (integ_twist)
         err_twist, integ_twist = self.apply_gain(err_twist, integ_twist)
-        # total_twist = des_twist  + err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
-        total_twist = err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
+        total_twist = des_twist  + err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
+        # total_twist = err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
         # self.q_dot = self.kdl_inv_vel_kine(cur_joint_pos=q_now, ee_twist=total_twist)
         self.q_dot = self.kdl_inv_vel_kine(cur_joint_pos=q_now, ee_twist=total_twist)
         self.q_dot = self.scale_joint_vel(self.q_dot)
