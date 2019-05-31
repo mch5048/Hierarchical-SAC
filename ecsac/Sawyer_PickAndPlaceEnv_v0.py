@@ -183,8 +183,12 @@ class robotEnv():
         self.jointCmdPub = rospy.Publisher('/robot/limb/right/joint_command', JointCommand, tcp_nodelay=True, queue_size=1)
         self.demo_target_pub = rospy.Publisher('/demo/target/', Pose, queue_size=1)
         self.resize_factor = 100/400.0
-        self.resize_factor_real = 100/400.0
+        self.resize_factor_real = 100/640.0
         self.tf_listenser = tf.TransformListener()
+        self.robot = URDF.from_parameter_server()
+        self.solve_fk = KDLKinematics(self.robot, "base", "right_gripper_tip")
+
+
 
         rospy.Subscriber('/robot/joint_states', JointState , self.jointStateCB)
         rospy.Subscriber('/robot/limb/right/endpoint_state', EndpointState , self.endpoint_positionCB)
@@ -214,8 +218,7 @@ class robotEnv():
         if train_indicator:
             rospy.on_shutdown(self._delete_gazebo_models)
         self._hover_distance = 0.05
-        self.robot = URDF.from_parameter_server()
-        self.solve_fk = KDLKinematics(self.robot, "base", "right_gripper_tip")
+
 
       
 
@@ -319,9 +322,7 @@ class robotEnv():
             _fk_mat = self.solve_fk.forward(self.joint_positions)
             _fk_fr = pm.fromMatrix(_fk_mat)
             self.endpt_ori = list(_fk_fr.M.GetQuaternion())
-            self.endpt_pos = _fk_mat
-
-
+            self.endpt_pos = list(_fk_fr.p)
         else:
             _endpt_pose = msg.pose
             self.endpt_ori = [_endpt_pose.orientation.x, _endpt_pose.orientation.y, _endpt_pose.orientation.z, _endpt_pose.orientation.w]
@@ -343,7 +344,8 @@ class robotEnv():
 
     def get_color_observation(self):
         if self.isReal:
-            return cv2.resize(self.color_image, None, fx=self.resize_factor_real, fy=self.resize_factor_real, interpolation=cv2.INTER_CUBIC)
+            return cv2.resize(self.color_image, dsize=(100, 100), interpolation=cv2.INTER_CUBIC)
+            # return cv2.resize(self.color_image, None, fx=self.resize_factor_real, fy=self.resize_factor_real, interpolation=cv2.INTER_CUBIC)
         else:
             return cv2.resize(self.color_image, None, fx=self.resize_factor, fy=self.resize_factor, interpolation=cv2.INTER_CUBIC)
 
@@ -376,11 +378,16 @@ class robotEnv():
         self.joint_cmd_msg.velocity = self.joint_commands # dtype should be list()
         self.jointCmdPub.publish(self.joint_cmd_msg)
         self._limb.set_command_timeout(1.0)
-        if int(gripper_command)==1 and self._get_dist() <= self.distance_threshold:
-            self.gripper_close()
-        elif self._get_dist() <= self.distance_threshold:
-            self.gripper_open()
-
+        if not self.isReal:
+            if int(gripper_command)==1 and self._get_dist() <= self.distance_threshold:
+                self.gripper_close()
+            elif self._get_dist() <= self.distance_threshold:
+                self.gripper_open()
+        else:
+            if int(gripper_command)==1:
+                self.gripper_close()
+            else:
+                self.gripper_open()
 
     def test_servo_vel(self, time_step):
         dynamic_pose = self.dynamic_object(step=time_step)
@@ -518,10 +525,10 @@ class robotEnv():
         self._delete_table()
         _des_goal = self._reset_desired_goal(goal_pose=block_pose, block_pose=block_pose)
 
-        starting_joint_angles['right_j0'] = np.random.uniform(-0.05, 0.05)
-        starting_joint_angles['right_j1'] = np.random.uniform(-0.95, -0.85)
-        starting_joint_angles['right_j2'] = np.random.uniform(-0.1, 0.1)
-        starting_joint_angles['right_j3'] = np.random.uniform(1.6, 1.7)
+        starting_joint_angles['right_j0'] = np.random.uniform(-0.07, 0.07)
+        starting_joint_angles['right_j1'] = np.random.uniform(-1.00, -1.1)
+        starting_joint_angles['right_j2'] = np.random.uniform(-0.2, 0.2)
+        starting_joint_angles['right_j3'] = np.random.uniform(1.4, 1.6)
 
         _start_angles = [starting_joint_angles['right_j0'], starting_joint_angles['right_j1'],
         starting_joint_angles['right_j2'], starting_joint_angles['right_j3'],
@@ -550,13 +557,13 @@ class robotEnv():
         block_pose = self.gen_block_pose()
         print ('block_pose', block_pose)
         print ('PLEASE LOCATE THE BLOCK AT DESIRABLE LOCATION.')
-        self._servo_to_pose(block_pose)
+        # self._servo_to_pose(block_pose)
         self.gripper_close()
         _des_goal = self.get_desired_goals()
-        starting_joint_angles['right_j0'] = np.random.uniform(-0.05, 0.05)
-        starting_joint_angles['right_j1'] = np.random.uniform(-1.05, -0.85)
-        starting_joint_angles['right_j2'] = np.random.uniform(-0.1, 0.1)
-        starting_joint_angles['right_j3'] = np.random.uniform(1.6, 1.7)
+        starting_joint_angles['right_j0'] = np.random.uniform(-0.07, 0.07)
+        starting_joint_angles['right_j1'] = np.random.uniform(-1.00, -1.1)
+        starting_joint_angles['right_j2'] = np.random.uniform(-0.2, 0.2)
+        starting_joint_angles['right_j3'] = np.random.uniform(1.4, 1.6)
         start_pose = [starting_joint_angles['right_j0'], starting_joint_angles['right_j1'],
         starting_joint_angles['right_j2'], starting_joint_angles['right_j3'],
         starting_joint_angles['right_j4'], starting_joint_angles['right_j5'],
@@ -789,6 +796,10 @@ class robotEnv():
         _targ_obj_obs = self.get_target_obj_obs()
         _gripper_pos = self.get_gripper_position()
         _ee_pose = self.get_end_effector_pose()
+        print ('=============================================')
+        print (_color_obs.shape)
+        print ('=============================================')
+
         obs = dict()
         obs['meas_state'] = [_joint_pos, _joint_vels, _joint_effos] # default observations
         obs['auxiliary'] = [_targ_obj_obs] # default observations
@@ -867,6 +878,7 @@ class robotEnv():
         """
         if self.endpt_pos[0] < 0.34 or abs(self.endpt_pos[1])>0.33 or self.endpt_pos[2]<-0.1 or self.endpt_pos[2]>0.75 or self.endpt_pos[0] > 0.95:
             self.termination_count +=1
+            self.reward -= 0.5
             if self.termination_count == TERM_THRES:
                 self.termination_count = 0
                 return True
@@ -883,7 +895,7 @@ class robotEnv():
         if self.reward_type == 'sparse':
             return (cur_dist <= self.distance_threshold).astype(np.float32) # 1 for success else 0
         else:
-            return -cur_dist -self.squared_sum_vel # -L2 distance -l2_norm(joint_vels)
+            return -cur_dist # -self.squared_sum_vel # -L2 distance -l2_norm(joint_vels)
 
 
     def compute_reward_from_goal(self, achieved_goal, desired_goal):

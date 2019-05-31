@@ -288,7 +288,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     reward_scale_lo = 1.0
 
     # coefs for nn ouput regularizers
-    reg_param = {'lam_mean':5e-1, 'lam_std':5e-2}
+    reg_param = {'lam_mean':1e-1, 'lam_std':1e-2}
 
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
@@ -320,11 +320,11 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     wandb.config.alp_lr = alp_lr
 
     # model save/load
-    USE_DEMO = True
-    PRETRAIN_MANAGER = True
-    USE_PRETRAINED_MANAGER = False
-    USE_PRETRAINED_MODEL = False
-    DATA_LOAD_STEP = 40000
+    USE_DEMO = True if train_indicator else False
+    PRETRAIN_MANAGER = True if train_indicator else False
+    USE_PRETRAINED_MANAGER = True if train_indicator else False
+    USE_PRETRAINED_MODEL = False if train_indicator else True
+    DATA_LOAD_STEP = 98000
     high_pretrain_steps = int(4e4) 
     high_pretrain_save_freq = int(1e4)
 
@@ -443,13 +443,13 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             rospy.loginfo("manager optimizers have been created")
             
             train_pi_hi_op = tf.contrib.layers.optimize_loss(
-                pi_loss_hi, global_step=global_step, learning_rate=pi_lr, optimizer=pi_hi_optimizer, variables=get_vars('manager/main/pi'),
-                increment_global_step=False, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm"), name='pi_hi_opt')
+                pi_loss_hi, global_step=None, learning_rate=pi_lr, optimizer=pi_hi_optimizer, variables=get_vars('manager/main/pi'),
+                increment_global_step=None, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"), name='pi_hi_opt')
 
             with tf.control_dependencies([train_pi_hi_op]): # expreimental application on high-level policy's learning in TD3.
                 train_q_hi_op = tf.contrib.layers.optimize_loss(
-                    q_loss_hi, global_step=global_step, learning_rate=vf_lr, optimizer=q_hi_optimizer, variables=get_vars('manager/main/q'),
-                    increment_global_step=False, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm"), name='q_hi_opt')
+                    q_loss_hi, global_step=None, learning_rate=vf_lr, optimizer=q_hi_optimizer, variables=get_vars('manager/main/q'),
+                    increment_global_step=None, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"), name='q_hi_opt')
 
             with tf.control_dependencies([train_q_hi_op]): # train_qfs 
                 with tf.name_scope('polyak_hi_update'):
@@ -465,7 +465,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         with tf.variable_scope('main'):
             # mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, pi_g, {'preact_reg':preact_reg, 'std_reg':std_reg}
             mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, q2_pi_lo, _, reg_losses, state_infer, std_lo = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
-            log_alpha_lo = tf.get_variable(name='log_alpha', initializer=-1.0, dtype=np.float32)
+            log_alpha_lo = tf.get_variable(name='log_alpha', initializer=0.0, dtype=np.float32)
             alpha_lo = tf.exp(log_alpha_lo) 
 
         with tf.variable_scope('main', reuse=True): # re use the variable of q1 and q2
@@ -522,16 +522,16 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # learnable temperature
             train_alpha_lo_op = alpha_lo_optimizer.minimize(alpha_loss_lo,var_list=[log_alpha_lo])
             train_pi_lo_op = tf.contrib.layers.optimize_loss(
-                pi_loss_lo, global_step=global_step, learning_rate=pi_lr, optimizer=pi_lo_optimizer, variables=get_vars('controller/main/pi'),
-                increment_global_step=False, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm"), name='pi_lo_opt')
+                pi_loss_lo, global_step=None, learning_rate=pi_lr, optimizer=pi_lo_optimizer, variables=get_vars('controller/main/pi'),
+                increment_global_step=None, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"), name='pi_lo_opt')
 
             with tf.control_dependencies([train_pi_lo_op]): # training pi won't affect learning vf
                 train_q1_lo_op = tf.contrib.layers.optimize_loss(
-                q1_loss_lo, global_step=global_step, learning_rate=vf_lr, optimizer=q1_lo_optimizer, variables=get_vars('controller/main/q1'),
-                increment_global_step=False, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm"), name='q1_lo_opt')
+                q1_loss_lo, global_step=None, learning_rate=vf_lr, optimizer=q1_lo_optimizer, variables=get_vars('controller/main/q1'),
+                increment_global_step=None, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"), name='q1_lo_opt')
                 train_q2_lo_op = tf.contrib.layers.optimize_loss(
-                q2_loss_lo, global_step=global_step, learning_rate=vf_lr, optimizer=q2_lo_optimizer, variables=get_vars('controller/main/q2'),
-                increment_global_step=False, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm"), name='q2_lo_opt')
+                q2_loss_lo, global_step=None, learning_rate=vf_lr, optimizer=q2_lo_optimizer, variables=get_vars('controller/main/q2'),
+                increment_global_step=None, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"), name='q2_lo_opt')
                 train_q_lo_op = tf.group(train_q1_lo_op, train_q2_lo_op)
             # Polyak averaging for target variables
             # (control flow because sess.run otherwise evaluates in nondeterministic order)
@@ -564,6 +564,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         step_lo_pi_ops.append(std_lo)
         step_lo_ops = {'q_ops': step_lo_q_ops, 'pi_ops':step_lo_pi_ops}
 
+        summary = tf.summary.merge_all()
     # Initializing targets to match main variables
     with tf.name_scope('init_networks'):
         target_init_hi = tf.group([tf.assign(v_targ, v_main)
@@ -725,7 +726,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
             pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
             # low_outs = sess.run(controller_ops + monitor_lo_ops, ctrl_feed_dict)
-            q_lo_outs = sess.run(q_ops +[golbal_step_op, ctrl_q1_summary, ctrl_q2_summary], ctrl_feed_dict)
+            q_lo_outs = sess.run(q_ops +[ctrl_q1_summary, ctrl_q2_summary], ctrl_feed_dict)
             # logging TODO :implement delayed updade of the low-level controller
             if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
                 pi_lo_outs = sess.run(pi_ops + [ctrl_pi_summary], ctrl_feed_dict)
@@ -736,20 +737,19 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 #             'q2_loss_lo': q_lo_outs[1], 'q1_lo': q_lo_outs[2], 
                 #             'q2_lo': q_lo_outs[3], 'global_step': cur_step})
                 # wandb.log({ 'q1_loss_lo': q_lo_outs[0], 'q2_loss_lo': q_lo_outs[1],'global_step': cur_step})                           
-
-        # summary_writer.add_summary(pi_lo_outs[-1], global_step) # low-pi summary
-        # summary_writer.add_summary(q_lo_outs[-2], global_step) # low-q1 summary
-        # summary_writer.add_summary(q_lo_outs[-1], global_step) # low-q2 summary
-        logger.store(Q1_lo=q_lo_outs[2], Q2_lo=q_lo_outs[3], Alpha_lo=pi_lo_outs[-3], Entropy_lo=-pi_lo_outs[1])                        
-        off_alpha = pi_lo_outs[-3]
-        off_log_std = pi_lo_outs[-2]
+            if itr == ep_len -1:
+                summary_writer.add_summary(pi_lo_outs[-1], step) # low-pi summary
+                summary_writer.add_summary(q_lo_outs[-2], step) # low-q1 summary
+                summary_writer.add_summary(q_lo_outs[-1], step) # low-q2 summary
+                logger.store(Q1_lo=q_lo_outs[2], Q2_lo=q_lo_outs[3], Alpha_lo=pi_lo_outs[-3], Entropy_lo=-pi_lo_outs[1])                        
+                off_alpha = pi_lo_outs[-3]
+                off_log_std = pi_lo_outs[-2]
 
     def off_policy_correction(subgoals, s_seq, o_seq, a_seq, candidate_goals=8, batch_size=64, discount=gamma, polyak=polyak):
         """ run off policy correction for state - action sequence (s_t:t+c-1, a_t:t+c-1)
         e.g. shape = (batch_size, seq, state_dim)
         we need additional o_seq to generate actions from low-level policy
         """
-        rospy.loginfo("Now we apply off-policy correciton")
         _s_seq = s_seq
         _o_seq = o_seq
         _a_seq = a_seq
@@ -821,7 +821,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         e.g. shape = (batch_size, seq, state_dim)
         we need additional o_seq to generate actions from low-level policy
         """
-        rospy.loginfo("Now we apply off-policy correciton")
         _s_seq = s_seq
         _o_seq = o_seq
         _a_seq = a_seq
@@ -833,9 +832,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         last_obs = [o[-1] for o in _o_seq] # o_t+c
         diff_goal = (np.array(last_states)-np.array(first_states))[:,np.newaxis,:] # s_t
         original_goal = np.array(subgoals)[:, np.newaxis, :] 
-        rospy.logwarn('=====================================')
-        print original_goal.shape
-        rospy.logwarn('=====================================')
         random_goals = np.random.normal(loc=diff_goal, scale= off_alpha * off_log_std, size=(batch_size, _candidate_goals, original_goal.shape[-1])) # gaussian centered @ s_t+c - s_t
         # TODO : modify the random goal samping 190525
         # shape (batch_size, 10, subgoal_dim)
@@ -911,6 +907,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             batch = _man_buffer.sample_batch(batch_size)
             # subgoal here is the action of manager network, action for computing log-likelihood
             # shape of corr_subgoals (batch_size, goal_dim)
+            print ('Now we apply off-policy correction')
             corr_subgoals = new_off_policy_correction(subgoals= batch['acts'],s_seq= batch['meas_st_seq'],
             o_seq= batch['ot_seq'], a_seq= batch['at_seq'])
             # action of the manager is subgoal...
@@ -929,14 +926,15 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
             if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
                 pi_hi_outs = sess.run(pi_ops + [man_pi_summary], man_feed_dict)
-                # summary_writer.add_summary(pi_hi_outs[-1] , global_step) # low-pi summary
                 # wandb.log({'policy_loss_hi': pi_hi_outs[0]})       
         # wandb.log({'q1_hi': q_hi_outs[0], 'q2_hi': q_hi_outs[1], 'q1_loss_hi': q_hi_outs[2],
         #             'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'global_step': step})
         # wandb.log({'q1_loss_hi': q_hi_outs[2],'q2_loss_hi': q_hi_outs[3], 'q_loss_hi': q_hi_outs[4], 'global_step': step})
-        rospy.loginfo('writes summary of high-level value-ftn')
-        logger.store(Q1_hi=q_hi_outs[0], Q2_hi=q_hi_outs[1])     
-        # summary_writer.add_summary(q_Minhi_outs[-1] , global_step) # low-q summary
+            if itr == ep_len - 1:
+                rospy.loginfo('writes summary of high-level value-ftn')
+                logger.store(Q1_hi=q_hi_outs[0], Q2_hi=q_hi_outs[1])    
+                summary_writer.add_summary(pi_hi_outs[-1],step) # low-pi summary
+                summary_writer.add_summary(q_hi_outs[-1],step) # low-q summary
 
     def pretrain_manager(demo_buffer, pretrain_steps, train_ops, batch_size=batch_size):
         """ Pre-trains the manager actor-critic network with data collected from demonstartions.
@@ -1116,7 +1114,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     start_time = time.time()
     while not rospy.is_shutdown() and t < int(total_steps):
 
-        if done or ep_len== max_ep_len: # if an episode is finished (no matter done==True)
+        if done or ep_len == max_ep_len: # if an episode is finished (no matter done==True)
             if t != 0 and train_indicator:
                 # train_low level controllers for the length of this episode
                 train_low_level_controller(train_ops=step_lo_ops, buffer=controller_buffer, ep_len=ep_len, step=t)
@@ -1124,7 +1122,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 # train high-level manager policy in delayed manner.
                 if timesteps_since_manager >= train_manager_freq:
                     timesteps_since_manager = 0
-                    train_high_level_manager(train_ops=step_hi_ops, buffer=manager_buffer, ep_len=int(ep_len/train_manager_freq/2), step=t)
+                    train_high_level_manager(train_ops=step_hi_ops, buffer=manager_buffer, ep_len=int(ep_len/train_manager_freq), step=t)
 
                 # Process final state/obs, store manager transition i.e. state/obs @ t+c
                 if len(manager_temp_transition[3]) != 1: # if not terminal state -> no next state will be observed
@@ -1289,4 +1287,4 @@ if __name__ == '__main__':
     from utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
     
-    ecsac(train_indicator=1, logger_kwargs=logger_kwargs) # 1 Train / 0 Test (@real)
+    ecsac(train_indicator=0, logger_kwargs=logger_kwargs) # 1 Train / 0 Test (@real)
