@@ -193,18 +193,6 @@ class ManagerReplayBuffer(ReplayBuffer):
         self.g1_buf[:demo_size], self.stt_buf[:demo_size], self.stt1_buf[:demo_size], \
         self.act_buf[:demo_size], self.rews_buf[:demo_size], self.done_buf[:demo_size], \
         self.aux_buf[:demo_size], self.aux1_buf[:demo_size] = demo_batch['data']
-        # rospy.logwarn('===== Reward buffer =====')
-        # print (self.rews_buf[:100])
-        # rospy.logwarn('===== Observation buffer =====')
-        print (self.obs_buf)
-        rospy.logwarn('===== Action buffer =====')
-        print (self.act_buf)
-        # rospy.logwarn('===== stt buffer =====')
-        # print (self.stt_buf[:100])
-        # rospy.logwarn('===== aux buffer =====')
-        # print (self.aux_buf[:100])
-        rospy.logwarn('===== done buffer =====')
-        print (self.done_buf)
         # store a batch of sequence demo data
         self.meas_stt_seq_buf[:demo_size], \
         self.aux_stt_seq_buf[:demo_size], \
@@ -333,11 +321,11 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
     # model save/load
     USE_DEMO = True
-    PRETRAIN_MANAGER = False
+    PRETRAIN_MANAGER = True
     USE_PRETRAINED_MANAGER = False
     USE_PRETRAINED_MODEL = False
     DATA_LOAD_STEP = 40000
-    high_pretrain_steps = int(5) 
+    high_pretrain_steps = int(4e4) 
     high_pretrain_save_freq = int(1e4)
 
     IS_TRAIN = train_indicator
@@ -721,6 +709,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         for itr in tqdm(range(ep_len)):
             cur_step = step - ep_len + itr
             batch = _ctrl_buffer.sample_batch(batch_size)
+    
             ctrl_feed_dict = {obs_ph: normalize_observation(c_obs=batch['ot']),
                          obs1_ph: normalize_observation(c_obs=batch['ot1']),
                          stt_ph: normalize_observation(meas_stt=batch['st']),
