@@ -74,7 +74,6 @@ class DemoReplayBuffer(object):
     def store(self, obs, obs1, g, g1, stt, stt1, act, aux, aux1, rew, done, manager=False):
         """store step transition in the buffer
         """
-        print (obs, obs1, g, g1, stt, stt1, act, aux, aux1, rew, done )
         self.obs_buf[self.ptr] = obs
         self.obs1_buf[self.ptr] = obs1
         self.g_buf[self.ptr] = g
@@ -96,8 +95,6 @@ class DemoReplayBuffer(object):
         <s, s', g, g', r>
         slicing index : buf[global_step - ep_len:global_step-1] => slice out only the transitions for this episode.
         """
-        rospy.logwarn('===== Current buffer data length =====')
-        print (self.stt_buf.shape[0])
         return [self.stt_buf[global_step-ep_len:global_step], self.stt1_buf[global_step-ep_len:global_step], 
                 self.g_buf[global_step-ep_len:global_step], self.g1_buf[global_step-ep_len:global_step],
                 self.rews_buf[global_step-ep_len:global_step]]
@@ -345,7 +342,6 @@ if __name__ == '__main__':
                 # gb[idx + i] = env.env_goal_transition(sb[idx + i], s1b[idx + i], gb[idx])
                 gb[idx + i] = env.env_goal_transition(sb[idx], s1b[idx + i], gb[idx])
                 rb[idx + i] = env.compute_intrinsic_reward(sb[idx + i], s1b[idx + i + 1], gb[idx + i])
-            print rb[idx:idx + manager_propose_freq]
         # 2. fill ther remaining transitions with terminal state observations
         # here, gb[-1], gb[-2], ... gb[-7] = sT in example. 
         sT = s1b[-1]

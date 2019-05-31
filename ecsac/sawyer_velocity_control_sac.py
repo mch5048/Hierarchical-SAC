@@ -598,7 +598,7 @@ class VelocityControl(object):
 
         # err_twist = self.to_kdl_twist(r.se3ToVec(r.MatrixLog6(err_mat)).tolist()) # cbModern robotics pp 230 22Nff
         # err_twist = self.get_err_twist(targ_fr, dT) # err term twist(Xd - X)
-        err_twist = self.get_err_twist(targ_fr, 1.0) # err term twist(Xd - X)
+        err_twist = self.get_err_twist(targ_fr, dT) # err term twist(Xd - X)
         # err_twist = pm.fromMatrix(cur_fk) * _err_twist  
         # err_twist *= 0.0
 
@@ -619,12 +619,17 @@ class VelocityControl(object):
         # total_twist = err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
         # self.q_dot = self.kdl_inv_vel_kine(cur_joint_pos=q_now, ee_twist=total_twist)
         self.q_dot = self.kdl_inv_vel_kine(cur_joint_pos=q_now, ee_twist=total_twist)
+        for _q_dot in self.q_dot:
+            if np.isnan(_q_dot):
+                rospy.logwarn('NaN vel is computed!')
+                self.q_dot = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.q_dot = self.scale_joint_vel(self.q_dot)
         # publish joint command 
         qdot_output = dict(zip(self.names, self.q_dot))
         # rospy.logwarn('=============== Computed joint vels ===============')
         # print (qdot_output)
         self.prev_frame = self.cur_frame # the call of this line seems crucial!!
+
         self.limb.set_joint_velocities(qdot_output)
         # rospy.logwarn('=============== Twist actual ===============')
         # print (self.ee_ang_twist + self.ee_lin_twist)
