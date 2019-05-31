@@ -30,7 +30,7 @@ GRIPPER_LOWER = 0.0
 
 TERM_THRES = 50
 SUC_THRES = 50
-CTRL_PERIOD = 70
+CTRL_PERIOD = 70.0 / 1000.0 # 70ms
 
 
 class demoEnv(robotEnv): 
@@ -118,7 +118,7 @@ class demoEnv(robotEnv):
         self.gripper_close()
         self.control_command[-1] = float(1)
 
-    @rate_limited(CTRL_PERIOD)
+    @rate_limited(CTRL_PERIOD) # in seconds
     def step_demo(self, action=None, time_step=1000):
         """Step the environment for demo collection episodes.
             :param action:
@@ -131,19 +131,16 @@ class demoEnv(robotEnv):
         self.tic = time.time()
         self.elapsed =  time.time()-self.prev_tic
         self.done = False
-        if time_step == self.max_steps:
-            self.done = True
         if not self.isReal:
             curDist = self._get_dist()
             self.reward = self._compute_reward()
-            if self.reward == 1.0:
-                self.success_count +=1
-                if self.success_count == SUC_THRES:
-                    print ('======================================================')
-                    print ('Succeeds current Episode : SUCCEEDED')
-                    print ('======================================================')
-                    self.success_count = 0
-                    self.done = True
+            if self.success_count == SUC_THRES:
+                print ('======================================================')
+                print ('Succeeds current Episode : SUCCEEDED')
+                print ('======================================================')
+                self.success_count = 0
+                self.done = True
+                
             if self._check_for_termination():
                 print ('======================================================')
                 print ('Terminates current Episode : OUT OF BOUNDARY')
@@ -166,18 +163,20 @@ class demoEnv(robotEnv):
         # achieved goal should be equivalent to the step observation dict.
         goal_obs = dict()
         obs = dict()
-        obs['full_state'] = [_joint_pos, _joint_vels, _joint_effos] # default observations
+        obs['meas_state'] = [_joint_pos, _joint_vels, _joint_effos] # default observations
         goal_obs['full_state'] = [_joint_pos, _joint_vels, _joint_effos] # default goal_observations
+        obs['auxiliary'] = [_targ_obj_obs]
+
         if self.isGripper:
-            obs['full_state'].append([_gripper_pos])
+            obs['meas_state'].append([_gripper_pos])
             goal_obs['full_state'].append([_gripper_pos])
         if self.isCartesian:
-            obs['full_state'].append(_ee_pose)
+            obs['auxiliary'].append(_ee_pose)
             goal_obs['full_state'].append(_ee_pose)
         if self.isPOMDP:
             obs['color_obs'] = _color_obs
             goal_obs['color_obs'] = _color_obs
-        return {'observation': obs,'achieved_goal':goal_obs, 'auxiliary':_targ_obj_obs}, self.reward_rescale*self.reward, self.done
+        return {'observation': obs,'achieved_goal':goal_obs}, self.reward_rescale*self.reward, self.done
 
 
     def reach_target_obj_vel_demo(self, target_pose):

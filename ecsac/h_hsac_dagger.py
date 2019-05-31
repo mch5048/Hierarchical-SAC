@@ -74,6 +74,7 @@ class DemoReplayBuffer(object):
     def store(self, obs, obs1, g, g1, stt, stt1, act, aux, aux1, rew, done, manager=False):
         """store step transition in the buffer
         """
+        print (obs, obs1, g, g1, stt, stt1, act, aux, aux1, rew, done )
         self.obs_buf[self.ptr] = obs
         self.obs1_buf[self.ptr] = obs1
         self.g_buf[self.ptr] = g
@@ -92,14 +93,22 @@ class DemoReplayBuffer(object):
 
     def get_episodic_subgoal(self, global_step, ep_len):
         """ Return the subgoal and fullstate batch of the episode.
-        <s, s', g, g'>
+        <s, s', g, g', r>
         slicing index : buf[global_step - ep_len:global_step-1] => slice out only the transitions for this episode.
         """
         rospy.logwarn('===== Current buffer data length =====')
         print (self.stt_buf.shape[0])
         return [self.stt_buf[global_step-ep_len:global_step], self.stt1_buf[global_step-ep_len:global_step], 
-                self.g_buf[global_step-ep_len:global_step], self.g1_buf[global_step-ep_len:global_step]]
+                self.g_buf[global_step-ep_len:global_step], self.g1_buf[global_step-ep_len:global_step],
+                self.rews_buf[global_step-ep_len:global_step]]
 
+    def calibrate_episodic_data(self, calib_batch, global_step, ep_len):
+        """ calibrate the episodic data 
+        <g, g', r> => tuple
+        """
+        self.g_buf[global_step-ep_len:global_step] = calib_batch['g_t']
+        self.g1_buf[global_step-ep_len:global_step] = calib_batch['g_t+1']
+        self.rews_buf[global_step-ep_len:global_step] = calib_batch['r_t']
 
     def return_buffer(self):
         """ Returns the whole numpy arrays containing demo transitions.
@@ -319,45 +328,37 @@ if __name__ == '__main__':
             in terms of controller -> g_t:t+c-1
             index : 2 & 3
         """
-        rospy.logwarn('====== DEBUGGING... DEBUGGING... DEBUGGING... ======')
-        print ('global_step')
-        print (global_step)
         # s_t+c should be the g_t for s_t. (e.g. s_10 == g_0 -> induces new proposal)
         # TODO :  implement asserting the shape below
-        sb, s1b, gb, g1b = controller_buffer.get_episodic_subgoal(global_step, ep_len) # returns each batch of the transition e<s, s', g, g'>
-        print ('data_shapes')
-        print ('following shapes should be match')
-        print (sb.shape)
-        print (s1b.shape)
-        print (gb.shape)
-        print (g1b.shape)
+        sb, s1b, gb, g1b, rb = controller_buffer.get_episodic_subgoal(global_step, ep_len) # returns each batch of the transition e<s, s', g, g'>
+
         # ep_len - ep_len % manager_propose_freq
         # Example : if an episode is 647 length, iterate till 640 (idx 639). Then, gb[640:646] should all be the terminal state. 
         # 1. replace the subgoal proposals in 'gb'
         remainder = sb.shape[0] % manager_propose_freq
-        print (ep_len)
-        print ('remainder')
-        print (remainder)
-        print ('man_prop_freq')
-        print (manager_propose_freq)
-        print ('idx')
         for idx in range(0, sb.shape[0] - remainder - manager_propose_freq, manager_propose_freq): # iterate until the full proposal period is met.
-            print (idx)
+            # print (idx)
             # gb[idx] = s1b[idx + manager_propose_freq - 1] - s1b[idx - 1] # s1b[idx + manager_propose_freq - 1] has the s_(idx + manager_propose_freq)
             gb[idx] = sb[idx + manager_propose_freq] - sb[idx] # g_kc = s_(k+1)c - s_kc , k= 0,1,2,...
+            rb[idx] = env.compute_intrinsic_reward(sb[idx], s1b[idx + 1], gb[idx])
             for i in range(1, manager_propose_freq): #[t+1:t+c-1]
-                gb[idx + i] = env.env_goal_transition(sb[idx + i], s1b[idx + i], gb[idx])
+                # gb[idx + i] = env.env_goal_transition(sb[idx + i], s1b[idx + i], gb[idx])
+                gb[idx + i] = env.env_goal_transition(sb[idx], s1b[idx + i], gb[idx])
+                rb[idx + i] = env.compute_intrinsic_reward(sb[idx + i], s1b[idx + i + 1], gb[idx + i])
+            print rb[idx:idx + manager_propose_freq]
         # 2. fill ther remaining transitions with terminal state observations
         # here, gb[-1], gb[-2], ... gb[-7] = sT in example. 
         sT = s1b[-1]
         for idx in range(1,remainder + 1):
             # gb[-idx] = sT
-            gb[-idx] = sT - sb[-remainder - 1]
+            gb[-idx] = sT - sb[-remainder - 1 + idx]
         # 3. copy the gb into g1b, with the index offset of 1. Then the last element of g1b is sT.
         g1b[:-1] = gb[1:]
-        g1b[-1] = sT
-            
+        g1b[-1] = np.ones(sT.shape)
+        # recompute reward here!, and substitue the demo
+        controller_buffer.calibrate_episodic_data({'g_t': gb, 'g_t+1': g1b,'r_t': rb}, global_step, ep_len)
 
+           
     def get_action():
         """ return the action inference from the external controller.
         """
@@ -451,7 +452,6 @@ if __name__ == '__main__':
         # add transition for low-level policy
         # (obs, obs1, sg, sg1, stt, stt1, act, aux, rew, done)
         # ( obs, obs1, g, g1, stt, stt1, act, aux, aux1, rew, done, manager=False):
-
         controller_buffer.store(c_obs, next_c_obs, subgoal, 
         next_subgoal, meas_stt, next_meas_stt, action, aux_stt, next_aux_stt, intrinsic_reward, done) # check the sequence of replay buffer..!
         # update observations and subgoal

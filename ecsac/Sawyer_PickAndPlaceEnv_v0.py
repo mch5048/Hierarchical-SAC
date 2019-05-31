@@ -72,8 +72,10 @@ fixed_orientation = Quaternion(
                          z=-0.00177030764765,
                          w=0.00253311793936)
 
+# KDL kinematics
 from urdf_parser_py.urdf import URDF
 from pykdl_utils.kdl_kinematics import KDLKinematics
+
 import tf.transformations as tr
 import PyKDL
 from math import pi, cos, sin, radians
@@ -108,6 +110,8 @@ overhead_orientation = Quaternion(
                             y=0.999994209902,
                             z=-0.00177030764765,
                             w=0.00253311793936)
+
+
 # register(
 #     id='Sawyer_DynaEnv-v0',
 #     entry_point='sac.envs.robotics.reach:DyReachEnv',
@@ -121,10 +125,10 @@ STATE_DIM = 24        # MDP
 GRIPPER_UPPER = 0.041667
 GRIPPER_LOWER = 0.0
 
-TERM_THRES = 50
-SUC_THRES = 50
+TERM_THRES = 30
+SUC_THRES = 30
 
-CTRL_PERIOD = 70 # in Hz, hard sync 
+CTRL_PERIOD = 70 / 1000 # in Hz, hard sync 
 
 class robotEnv(): 
     def __init__(self, max_steps=700, isdagger=False, isPOMDP=False, isGripper=False, isCartesian=True, train_indicator=1):
@@ -184,7 +188,7 @@ class robotEnv():
 
         rospy.Subscriber('/robot/joint_states', JointState , self.jointStateCB)
         rospy.Subscriber('/robot/limb/right/endpoint_state', EndpointState , self.endpoint_positionCB)
-        if self.train_indicator: # train
+        if self.isReal: # train
             rospy.Subscriber("/camera/color/image_raw", Image, self.rgb_ImgCB)
         else:
             rospy.Subscriber("/dynamic_objects/camera/raw_image", Image, self.rgb_ImgCB)
@@ -209,11 +213,10 @@ class robotEnv():
         self.success_count = 0
         if train_indicator:
             rospy.on_shutdown(self._delete_gazebo_models)
+        self._hover_distance = 0.05
+        self.robot = URDF.from_parameter_server()
+        self.solve_fk = KDLKinematics(self.robot, "base", "right_gripper_tip")
 
-        # goal related
-        self._hover_distance = 0.1
-        # self.controller_connection = ControllersConnection(namespace='robot',
-        #  controllers_list=['right_joint_position_controller', 'right_joint_velocity_controller', 'right_joint_effort_controller'])
       
 
     def move_to_start(self, start_angles=None):
@@ -249,7 +252,6 @@ class robotEnv():
     def observation_space(self):
         """
         Observation space.
-
         :return: gym.spaces
                     observation space
         """
@@ -299,7 +301,6 @@ class robotEnv():
         """ Discrepancy btwn sim and real.
             sim : tip of the gripper
             real : base of the gripper
-
             gripper_pos = np.array(self._limb.endpoint_pose()['position'])
             gripper_ori = np.array(self._limb.endpoint_pose()['orientation'])
             gripper_lvel = np.array(self._limb.endpoint_velocity()['linear'])
@@ -308,10 +309,19 @@ class robotEnv():
             gripper_torque = np.array(self._limb.endpoint_effort()['torque'])
         """
         if self.isReal:
-            try:
-                (self.endpt_pos, self.endpt_ori) = self.tf_listenser.lookupTransform('/base','/right_gripper_tip', rospy.Time(0))
-            except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
-                pass
+            # try:
+            #     (self.endpt_pos, self.endpt_ori) = self.tf_listenser.lookupTransform('/base','/right_gripper_tip', rospy.Time(0))
+            # except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+            #     pass            
+            # _rot_mat = _fk_mat[0:3, 0:3] # 3*3 rotation matrix 
+            # _trans_vect = _fk_mat[0:3, 3]
+            
+            _fk_mat = self.solve_fk.forward(self.joint_positions)
+            _fk_fr = pm.fromMatrix(_fk_mat)
+            self.endpt_ori = list(_fk_fr.M.GetQuaternion())
+            self.endpt_pos = _fk_mat
+
+
         else:
             _endpt_pose = msg.pose
             self.endpt_ori = [_endpt_pose.orientation.x, _endpt_pose.orientation.y, _endpt_pose.orientation.z, _endpt_pose.orientation.w]
@@ -405,14 +415,12 @@ class robotEnv():
         if not self.isReal:
             curDist = self._get_dist()
             self.reward = self._compute_reward()
-            if self.reward==1.0:
-                self.success_count +=1
-                if self.success_count == SUC_THRES:
-                    print ('======================================================')
-                    print ('Succeeds current Episode : SUCCEEDED')
-                    print ('======================================================')
-                    self.success_count = 0
-                    self.done = True
+            if self.success_count == SUC_THRES:
+                print ('======================================================')
+                print ('Succeeds current Episode : SUCCEEDED')
+                print ('======================================================')
+                self.success_count = 0
+                self.done = True
             if self._check_for_termination():
                 print ('======================================================')
                 print ('Terminates current Episode : OUT OF BOUNDARY')
@@ -496,7 +504,7 @@ class robotEnv():
         ik_pose.orientation.w = current_pose['orientation'].w
         self._servo_to_pose(ik_pose)
         print ('=============== retracting... ===============')
-        rospy.sleep(1.0)
+        # rospy.sleep(1.0)
 
 
     def _reset_gazebo(self):
@@ -860,7 +868,7 @@ class robotEnv():
         if self.endpt_pos[0] < 0.34 or abs(self.endpt_pos[1])>0.33 or self.endpt_pos[2]<-0.1 or self.endpt_pos[2]>0.75 or self.endpt_pos[0] > 0.95:
             self.termination_count +=1
             if self.termination_count == TERM_THRES:
-                self.termination_count =0
+                self.termination_count = 0
                 return True
             else:
                 return False    
@@ -870,6 +878,8 @@ class robotEnv():
         """Computes shaped/sparse reward for each episode.
         """
         cur_dist = self._get_dist()
+        if cur_dist <= self.distance_threshold:
+            self.success_count += 1  
         if self.reward_type == 'sparse':
             return (cur_dist <= self.distance_threshold).astype(np.float32) # 1 for success else 0
         else:
@@ -1006,3 +1016,4 @@ class robotEnv():
         else:
             # rospy.logerr("INVALID JOINTS - No Cartesian Solution Found.")
             return False
+
