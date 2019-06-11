@@ -868,6 +868,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # TODO : modify the random goal samping 190525
         # shape (batch_size, 10, seq_len, subgoal_dim)
         candidates = np.concatenate([original_goal, diff_goal, random_goals], axis=1)
+        cand_goals = np.concatenate([original_goal, diff_goal, random_goals], axis=1)[:, :, 0, :]
+
         candidates = candidates.transpose(1, 2, 0, 3) # (ncands, seq_len, batch_size, state_dim)
         # subgoal transition for candidates is nencessary
         # should define what is 'subgoal'?
@@ -907,7 +909,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         obs_dim = _o_seq[0][0].shape # since the shape is (batch, seq_len,) + shape
         ncands = candidates.shape[1] # 10          
         # observations = _o_seq.reshape((batch_over_seq,) + obs_dim)
-        logp_lo_actions = np.zeros((ncands, seq_len, batch_size, obs_dim[0])) # shape (ncands, seq_len, batch_size, state_dim)
+        logp_lo_actions = np.zeros((ncands, seq_len, batch_size)) # shape (ncands, seq_len, batch_size, state_dim)
         
         # for which goal the new low policy would have taken the same action as the old one?
         # TODO: debug the shape for the batch action estimations
@@ -928,7 +930,12 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         max_indicies = np.argmax(seq_sum_logp, axis=0) # argmax along the n_cands -> batch of goals having the most log_prob
         # shape of max_indices ->(batch_size,) -> index along 10 candidates for each batch
         # shape of the candidates (batch, n_cands, goal_dim)
-        return candidates[np.arange(batch_size),max_indicies] # [for each batch, max index]
+
+
+        # candidates = candidates.transpose(1, 2, 0, 3) # (ncands, seq_len, batch_size, state_dim)
+        #   0          1        2           3
+        #(batch_size, cands, seq_len, subgoal_dim)
+        return cand_goals[np.arange(batch_size),max_indicies] # [for each batch, max index]
 
     def train_high_level_manager(train_ops, buffer, ep_len=(max_ep_len/manager_propose_freq), batch_size=batch_size, discount=gamma, polyak=polyak, step=0):
         """ train high-level actor-critic for each episode's (timesteps/manager_train_freq)
