@@ -9,6 +9,7 @@ CRIT_L2_REG = 1e-3
 init_scale=np.sqrt(2)
 xavier = tf.contrib.layers.xavier_initializer()
 ortho = tf.keras.initializers.Orthogonal(init_scale, seed=0)
+layer_nomr = tf.contrib.layer   
 
 def ortho_init(scale=1.0):
     """
@@ -79,7 +80,7 @@ def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None, kerne
         x = (tf.layers.dense(x, units=h, activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer))
     return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer)
 
-def cnn_feature_extractor(x, activation=tf.nn.relu, kernel_regularizer=None, kernel_initializer=ortho):
+def cnn_feature_extractor(x, activation=tf.nn.relu, kernel_regularizer=None, kernel_initializer=uniform):
     x = tf.layers.conv2d(x, filters=32,kernel_size=8, strides=(4,4), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv1')
     x = tf.layers.conv2d(x, filters=64,kernel_size=4, strides=(2,2), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv2')
     x = tf.layers.conv2d(x, filters=64,kernel_size=3, strides=(1,1), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv3')
@@ -280,18 +281,14 @@ def cnn_controller_actor_critic(stt, obs, goal, act, aux, action_space=None, hid
     # policy
     with tf.variable_scope('pi'):
         _mu, _pi, _logp_pi, std, pi_g, logp_pi_g = policy(obs, act, goal, activation, output_activation, kernel_initializer=ortho)
-        _mu, _pi, logp_pi = apply_squashing_func(_mu, _pi, _logp_pi)
+        _mu, _pi, _logp_pi = apply_squashing_func(_mu, _pi, _logp_pi)
         mu = tf.concat([_mu, pi_g], axis=-1)
         pi = tf.concat([_pi, pi_g], axis=-1)
+        logp_pi = tf.concat([_logp_pi, logp_pi_g], axis=-1)
 
     # poliy reg losses 
     preact_reg = tf.norm(_mu)
     std_reg = tf.norm(std)
-
-    print ('=========================================================')
-    print (preact_reg)
-    print (std_reg)
-    print ('=========================================================')
     # value ftns
     vf_mlp = lambda x : tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None, kernel_regularizer=kernel_regularizer), axis=1)
     with tf.variable_scope('q1'):
