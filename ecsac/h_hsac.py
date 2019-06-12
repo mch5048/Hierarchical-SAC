@@ -259,7 +259,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     candidate_goals = 8
 
     # general hyper_params
-    seed=0 
+    seed=777
     # epoch : in terms of training nn
     steps_per_epoch=2000
     epochs=300
@@ -333,13 +333,19 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     USE_CARTESIAN = True
     USE_GRIPPER = True
 
-    exp_name = 'hiro-ecsac-td3'
+    exp_name = 'h_hsac_demo'
+
 
     logger = EpochLogger(output_dir=log_path,exp_name=exp_name, seed=seed)
     logger.save_config(locals())
 
     tf.set_random_seed(seed)
     np.random.seed(seed)
+
+
+
+
+
 
     # arguments for RobotEnv : isdagger, isPOMDP, isGripper, isReal
     env = robotEnv(max_steps=max_ep_len, isPOMDP=True, isGripper=USE_GRIPPER, isCartesian=USE_CARTESIAN, train_indicator=IS_TRAIN)
@@ -471,7 +477,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         with tf.variable_scope('main'):
             # mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, pi_g, {'preact_reg':preact_reg, 'std_reg':std_reg}
             mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, q2_pi_lo, _, reg_losses, state_infer, std_lo = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
-            log_alpha_lo = tf.get_variable(name='log_alpha', initializer=-0.5, dtype=np.float32)
+            log_alpha_lo = tf.get_variable(name='log_alpha', initializer=-1.0, dtype=np.float32)
             alpha_lo = tf.exp(log_alpha_lo) 
 
         with tf.variable_scope('main', reuse=True): # re use the variable of q1 and q2
@@ -516,7 +522,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             q2_loss_lo += q2_l2_loss_lo
 
         with tf.name_scope('alpha_loss_lo'):
-            alpha_loss_lo = -tf.reduce_mean(log_alpha_lo*tf.stop_gradient(logp_pi_lo + target_ent)) # -alpha * log_p_pi - alpha * target_ent
+            alpha_loss_lo = -tf.reduce_mean(alpha_lo*tf.stop_gradient(logp_pi_lo + target_ent)) # -alpha * log_p_pi - alpha * target_ent
 
         with tf.name_scope('optimize'):
             pi_lo_optimizer = tf.train.AdamOptimizer(learning_rate=pi_lr, name='pi_lo_optimizer')
