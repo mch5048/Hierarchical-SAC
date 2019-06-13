@@ -128,9 +128,21 @@ class ReplayBuffer(object):
         self.ptr = demo_size % self.max_size
         self.size = min(demo_size, self.max_size)
         nonz = np.count_nonzero(self.done_buf)
-        print ("Not 'dones' in low-level buffer")
+        print ("# of DONES in the low-level buffer")
         print (nonz)
         print ('===========================')
+        nonz = np.count_nonzero(self.done_buf)
+        print ("# of DONES in the high-level buffer")
+        print (nonz)
+        print ('===========================')
+        print ("scale of the high-level rewards")
+        print (self.rews_buf[:100])
+        print (self.rews_buf[1000:1100])
+        print (self.rews_buf[3000:3100])
+        print ('===========================')
+
+
+
 
 class ManagerReplayBuffer(ReplayBuffer):
     """
@@ -202,10 +214,15 @@ class ManagerReplayBuffer(ReplayBuffer):
         self.ptr = demo_size % self.max_size
         self.size = min(demo_size, self.max_size)
         
-        nonz = np.count_nonzero(self.done_buf)
-        print ("Not 'dones' in high-level buffer")
-        print (nonz)
-        print ('===========================')
+        # nonz = np.count_nonzero(self.done_buf)
+        # print ("# of DONES in the high-level buffer")
+        # print (nonz)
+        # print ('===========================')
+        # print ("scale of the high-level rewards")
+        # print (self.rews_buf[:100])
+        # print (self.rews_buf[1000:1100])
+        # print (self.rews_buf[3000:3100])
+        # print ('===========================')
 
 """
 Midified Soft Actor-Critic
@@ -331,9 +348,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     PRETRAIN_MANAGER = True if train_indicator else False
     USE_PRETRAINED_MANAGER = False #  True if train_indicator else False
     USE_PRETRAINED_MODEL = False if train_indicator else True
-    DATA_LOAD_STEP = 98000
+    DATA_LOAD_STEP = 40000
     # high_pretrain_steps = int(4e4) 
-    high_pretrain_steps = int(4e4) 
+    high_pretrain_steps = int(3e4) 
     high_pretrain_save_freq = int(1e4)
 
     IS_TRAIN = train_indicator
@@ -421,7 +438,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             mu_hi, q1_hi, q2_hi, q1_pi_hi, pi_reg_hi = manager_actor_critic(stt_ph, sg_ph, aux_ph, action_space=None) # meas_St, Sg, aux_St
         # target_policy network
         with tf.variable_scope('target'):
-            mu_hi_targ, _, _, _, _ = manager_actor_critic(stt1_ph, sg_ph, aux1_ph, action_space=None)
+            mu_hi_targ, _, _, _, _ = manager_actor_critic(stt1_ph, sg1_ph, aux1_ph, action_space=None)
 
         # target_Q networks
         with tf.variable_scope('target', reuse=True): # re use the variable of q1 and q2
@@ -438,8 +455,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # Losses for TD3
         with tf.name_scope('pi_loss_hi'):
             pi_loss_hi = -tf.reduce_mean(q1_pi_hi)
-            # l2_loss_pi_hi = tf.losses.get_regularization_loss()
-            # pi_loss_hi += l2_loss_pi_hi # regularization loss for the actor
+            l2_loss_pi_hi = tf.losses.get_regularization_loss()
+            pi_loss_hi += l2_loss_pi_hi # regularization loss for the actor
             pi_loss_hi += pi_reg_hi * reg_param['lam_mean'] # regularization loss for the actor
         with tf.name_scope('q_loss_hi'):
             min_q_targ_hi = tf.minimum(q1_targ_hi, q2_targ_hi) # tensor
