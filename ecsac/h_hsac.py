@@ -121,15 +121,16 @@ class ReplayBuffer(object):
             'size'= > should increase the ptr as this much.)
         """
         demo_size = demo_batch['size']
-        print ('========= DEMO SIZE =========')
-        print demo_size
         self.obs_buf[:demo_size], self.obs1_buf[:demo_size], self.g_buf[:demo_size], \
         self.g1_buf[:demo_size], self.stt_buf[:demo_size], self.stt1_buf[:demo_size], \
         self.act_buf[:demo_size], self.rews_buf[:demo_size], self.done_buf[:demo_size], \
         self.aux_buf[:demo_size], self.aux1_buf[:demo_size] = demo_batch['data']
         self.ptr = demo_size % self.max_size
         self.size = min(demo_size, self.max_size)
-
+        nonz = np.count_nonzero(self.done_buf)
+        print ("Not 'dones' in low-level buffer")
+        print (nonz)
+        print ('===========================')
 
 class ManagerReplayBuffer(ReplayBuffer):
     """
@@ -200,6 +201,12 @@ class ManagerReplayBuffer(ReplayBuffer):
         self.act_seq_buf[:demo_size] = demo_batch['seq_data']
         self.ptr = demo_size % self.max_size
         self.size = min(demo_size, self.max_size)
+        
+        nonz = np.count_nonzero(self.done_buf)
+        print ("Not 'dones' in high-level buffer")
+        print (nonz)
+        print ('===========================')
+
 """
 Midified Soft Actor-Critic
 SAC + Asym-AC + Leveraging demos
@@ -326,7 +333,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     USE_PRETRAINED_MODEL = False if train_indicator else True
     DATA_LOAD_STEP = 98000
     # high_pretrain_steps = int(4e4) 
-    high_pretrain_steps = int(2e4) 
+    high_pretrain_steps = int(4e4) 
     high_pretrain_save_freq = int(1e4)
 
     IS_TRAIN = train_indicator
@@ -1190,7 +1197,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                     manager_temp_transition[5] = c_obs # save o_t+c
                     manager_temp_transition[9] = meas_stt # save meas_stt_t+c
                     manager_temp_transition[12] = aux_stt # save aux_stt_t+c
-                    manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode
+                    manager_temp_transition[-1] = done # done = True for manager, regardless of the episode
                 # make sure every manager transition have the same length of sequence
                 # TODO: debug here...
                 if len(manager_temp_transition[0]) <= manager_propose_freq: # len(state_seq) = propose_freq +1 since we save s_t:t+c as a seq.
@@ -1296,7 +1303,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 manager_temp_transition[5] = c_obs # save o_t+c
                 manager_temp_transition[9] = meas_stt # save s_t+c
                 manager_temp_transition[11] = aux_stt # save s_t+c
-                manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode 
+                manager_temp_transition[-1] = done # done = True for manager, regardless of the episode 
                 
                 # intentional seq appending is not required here since it always satisfies c step.
                 manager_buffer.store(*manager_temp_transition)

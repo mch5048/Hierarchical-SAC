@@ -374,7 +374,7 @@ if __name__ == '__main__':
                     manager_temp_transition[5] = c_obs # save o_t+c ** abstracted next state!
                     manager_temp_transition[9] = meas_stt # save s_t+c ** abstracted next state!
                     manager_temp_transition[12] = aux_stt # save aux_t+c ** abstracted next state!
-                    manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode
+                    manager_temp_transition[-1] = done # done = True for manager, regardless of the episode
                 # make sure every manager transition have the same length of sequence
                 # TODO: debug here...
                 if len(manager_temp_transition[0]) <= manager_propose_freq: # there's equal sign! len(state_seq) = propose_1freq +1 since we save s_t:t+c as a seq.
@@ -469,7 +469,7 @@ if __name__ == '__main__':
             manager_temp_transition[5] = c_obs # save o_t+c
             manager_temp_transition[9] = meas_stt # save s_t+c
             manager_temp_transition[12] = aux_stt # save aux_t+c
-            manager_temp_transition[-1] = float(True) # done = True for manager, regardless of the episode 
+            manager_temp_transition[-1] = done # done = True for manager, regardless of the episode 
             
             manager_buffer.store(*manager_temp_transition)
             subgoal = get_demo_temp_subgoal() # action_dim = (1, stt_dim) -> defaults to 25-dim
