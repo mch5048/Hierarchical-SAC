@@ -345,7 +345,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
     # model save/load
     USE_DEMO = True if train_indicator else False
-    PRETRAIN_MANAGER = True if train_indicator else False
+    # PRETRAIN_MANAGER = True if train_indicator else False
+    PRETRAIN_MANAGER = False
     USE_PRETRAINED_MANAGER = False #  True if train_indicator else False
     USE_PRETRAINED_MODEL = False if train_indicator else True
     DATA_LOAD_STEP = 40000
