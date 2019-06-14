@@ -128,18 +128,6 @@ class ReplayBuffer(object):
         self.ptr = demo_size % self.max_size
         self.size = min(demo_size, self.max_size)
         nonz = np.count_nonzero(self.done_buf)
-        print ("# of DONES in the low-level buffer")
-        print (nonz)
-        print ('===========================')
-        nonz = np.count_nonzero(self.done_buf)
-        print ("# of DONES in the high-level buffer")
-        print (nonz)
-        print ('===========================')
-        print ("scale of the high-level rewards")
-        print (self.rews_buf[:100])
-        print (self.rews_buf[1000:1100])
-        print (self.rews_buf[3000:3100])
-        print ('===========================')
 
 
 
@@ -213,16 +201,10 @@ class ManagerReplayBuffer(ReplayBuffer):
         self.act_seq_buf[:demo_size] = demo_batch['seq_data']
         self.ptr = demo_size % self.max_size
         self.size = min(demo_size, self.max_size)
-        
-        # nonz = np.count_nonzero(self.done_buf)
-        # print ("# of DONES in the high-level buffer")
-        # print (nonz)
-        # print ('===========================')
-        # print ("scale of the high-level rewards")
-        # print (self.rews_buf[:100])
-        # print (self.rews_buf[1000:1100])
-        # print (self.rews_buf[3000:3100])
-        # print ('===========================')
+        nonz = np.count_nonzero(self.done_buf)
+        print ("# of DONES in the high-level buffer")
+        print (nonz)
+
 
 """
 Midified Soft Actor-Critic
@@ -351,7 +333,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     USE_PRETRAINED_MODEL = False if train_indicator else True
     DATA_LOAD_STEP = 40000
     # high_pretrain_steps = int(4e4) 
-    high_pretrain_steps = int(3e4) 
+    high_pretrain_steps = int(2e4) 
     high_pretrain_save_freq = int(1e4)
 
     IS_TRAIN = train_indicator
@@ -473,12 +455,6 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             pi_hi_optimizer = tf.train.AdamOptimizer(learning_rate=pi_lr, name='pi_hi_optimizer')
             q_hi_optimizer = tf.train.AdamOptimizer(learning_rate=vf_lr, name='q_hi_optimizer')
             rospy.loginfo("manager optimizers have been created")
-            
-            print ('===============================================')
-            man_vars = get_vars('manager/main/pi')
-            print (man_vars)
-            print ('===============================================')
-
             train_pi_hi_op = tf.contrib.layers.optimize_loss(
                 pi_loss_hi, global_step=None, learning_rate=pi_lr, optimizer=pi_hi_optimizer, variables=get_vars('manager/main/pi'),
                 increment_global_step=None, clip_gradients=20.0, summaries=("loss", "gradients", "gradient_norm", "global_gradient_norm"), name='pi_hi_opt')
@@ -524,8 +500,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - min_q_pi_lo ) # - policy_prior_log_probs # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
             # pi_l2_loss_lo = tf.losses.get_regularization_loss()
             # pi_loss_lo += pi_l2_loss_lo
-            pi_loss_lo += reg_losses['preact_reg'] * reg_param['lam_mean'] # regularization losses for the actor
-            pi_loss_lo += reg_losses['std_reg'] * reg_param['lam_std']
+            # pi_loss_lo += reg_losses # regularization losses for the actor
+            pi_loss_lo += reg_losses['preact_mu'] * reg_param['lam_mean'] # regularization losses for the actor
+            pi_loss_lo += reg_losses['preact_std'] * reg_param['lam_std']
             state_infer_loss_lo = tf.losses.mean_squared_error(labels=tf.concat([stt_ph, aux_ph], axis=-1), predictions=state_infer, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             pi_loss_lo += state_infer_loss_lo            
             pi_l2_loss_lo = tf.losses.get_regularization_loss()

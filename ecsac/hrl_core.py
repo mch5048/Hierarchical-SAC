@@ -244,6 +244,7 @@ def mlp_manager_actor_critic(stt, goal, sub_goal, aux, action_space=None, hidden
                       joint_p=joint_p, joint_v=joint_v, joint_e=joint_e)       
     """
     kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=CRIT_L2_REG)
+    kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=CRIT_L2_REG)
 
     # policy
     with tf.variable_scope('pi'): # '/manager/main/pi/'
