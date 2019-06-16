@@ -226,7 +226,7 @@ if __name__ == '__main__':
 
     # demo quantity related
     total_epi = 20
-    max_ep_len = 500
+    max_ep_len = 1000
     total_steps = total_epi * max_ep_len
     buffer_size = int(5e4) # 50000 steps : is it enough?
     manager_propose_freq = 10
@@ -366,6 +366,8 @@ if __name__ == '__main__':
     while not rospy.is_shutdown() and t <int(total_steps):
 
         if done or ep_len == max_ep_len: # if an episode is finished (no matter done==True)
+            if ep_len == max_ep_len:
+                rospy.set_param('reset_traj', True)           
             if t != 0:
                 # Process final state/obs, store manager transition i.e. state/obs @ t+c
                 if len(manager_temp_transition[3]) != 1:

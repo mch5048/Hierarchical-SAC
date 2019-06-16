@@ -143,6 +143,14 @@ class VelocityControl(object):
         self.dist_threshold = 0.02
         # control loop
         while not rospy.is_shutdown():
+            if rospy.has_param('reset_traj'):
+                print ('Reset the incomplete trajectory ...')
+                self.cur_wp_idx = 0
+                self.isPathPlanned = False
+                self.traj_elapse = 0
+                self.integ_twist = PyKDL.Twist(PyKDL.Vector(0, 0, 0), PyKDL.Vector(0, 0, 0)) # initialize integral twist 
+                self.path_planning() # get list of planned waypoints
+                rospy.delete_param('reset_traj')
             if rospy.has_param('vel_calc'):
                 if not self.isPathPlanned: # if path is not planned
                     _type = rospy.get_param('vel_calc')
@@ -154,7 +162,7 @@ class VelocityControl(object):
     def ref_poseCB(self, goal_pose): # Takes target pose, returns ref se3
         rospy.logdebug("ref_pose_cb called in velocity_control.py")
         # p = np.array([some_pose.position.x, some_pose.position.y, some_pose.position.z])
-        p = np.array([goal_pose.position.x, goal_pose.position.y + 0.1, goal_pose.position.z])
+        p = np.array([goal_pose.position.x, goal_pose.position.y, goal_pose.position.z])
         quat = np.array([goal_pose.orientation.x, goal_pose.orientation.y, goal_pose.orientation.z, goal_pose.orientation.w])
         goal_tmp = tr.compose_matrix(angles=tr.euler_from_quaternion(quat, 'sxyz'), translate=p) # frame is spatial 'sxyz', return Euler angle from quaternion for specified axis sequence.
         with self.mutex:
@@ -198,8 +206,8 @@ class VelocityControl(object):
 
         X_current = self._get_tf_matrix(current_pose)
         X_goal = self.original_goal
-        X_goal[2][3] += 0.01
-        X_goal[1][3] += 0.02
+        X_goal[2][3] += 0.015 # z trans
+        X_goal[1][3] += 0.03 # y trans
         rospy.logwarn('=============== Current pose ===============')
         print (X_current)
         rospy.logwarn('=============== Goal goal ===============')
@@ -218,10 +226,15 @@ class VelocityControl(object):
     def _check_traj(self, dT):
         """Check if the end-effector has reached the desired position of target waypoint.
         """
-        _ee_position = self._get_ee_position()
         _targ_wp_position = tr.translation_from_matrix(self.traj_list[self.cur_wp_idx])
 
         if self.cur_wp_idx < self.num_wp - 1: # indicate next waypoint
+            current_pose = self.limb.endpoint_pose()
+            X_current = self._get_tf_matrix(current_pose)
+            # self.traj_list[self.cur_wp_idx]
+            # norm = np.linalg.norm(X_current - self.traj_list[self.cur_wp_idx])
+            # print (norm)
+            # if norm <= 0.03:
             self.cur_wp_idx += 1
             self.traj_elapse += dT
         elif self.cur_wp_idx == self.num_wp - 1: # robot has reached the last waypoint
@@ -487,7 +500,7 @@ class VelocityControl(object):
         """ Get the desirable twist for given error.
         """
         _cur_frame = self.get_current_frame()
-        return PyKDL.diff(_cur_frame, goal_frame, dT) 
+        return PyKDL.diff(_cur_frame, goal_frame) 
 
 
     def get_des_twist(self, dT):
@@ -566,8 +579,8 @@ class VelocityControl(object):
 
 
     def apply_gain(self, prop_err, integ_err):
-        Kp = 5.0
-        Ki = 0.0
+        Kp = 0.5
+        Ki = 0.00
         return Kp * prop_err, Ki * integ_err
 
 
@@ -594,7 +607,7 @@ class VelocityControl(object):
             T_sd = self._get_goal_matrix() # 
             targ_fr = self.get_frame(T_sd)
         dT = self.get_dt()
-        err_mat = np.dot(np.linalg.inv(pm.toMatrix(self.get_current_frame())), pm.toMatrix(targ_fr))
+        # err_mat = np.dot(np.linalg.inv(pm.toMatrix(self.get_current_frame())), pm.toMatrix(targ_fr))
 
         # err_twist = self.to_kdl_twist(r.se3ToVec(r.MatrixLog6(err_mat)).tolist()) # cbModern robotics pp 230 22Nff
         # err_twist = self.get_err_twist(targ_fr, dT) # err term twist(Xd - X)
@@ -607,6 +620,12 @@ class VelocityControl(object):
         # des_twist = pm.fromMatrix(cur_fk) * _des_twist        
         # des_twist = self.adj_to_twist(err_mat, _des_twist)
         # des_twist =self.to_kdl_twist(des_twist)
+        # print ('GOAL POSE')
+        # print (self.original_goal)
+        # print ('CUR POSE')
+        # cur_pose = self.limb.endpoint_pose()
+        # print (cur_pose)
+
         # rospy.logwarn('=============== Twist error ===============')
         # print (err_twist)
         # rospy.logwarn('=============== Twist desired ===============')
