@@ -129,9 +129,6 @@ class ReplayBuffer(object):
         self.size = min(demo_size, self.max_size)
         nonz = np.count_nonzero(self.done_buf)
 
-
-
-
 class ManagerReplayBuffer(ReplayBuffer):
     """
     A simple FIFO experience replay buffer for ECSAC + HIRO agents.
@@ -294,7 +291,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     reward_scale_lo = 1.0
 
     # coefs for nn ouput regularizers
-    reg_param = {'lam_mean':1e-1, 'lam_std':5e-1}
+    # NOTE : check if these parameters are crucial for low-level polic y
+    reg_param = {'lam_mean':1e-1, 'lam_std':1e-3}
 
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
@@ -327,8 +325,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
     # model save/load
     USE_DEMO = True if train_indicator else False
-    # PRETRAIN_MANAGER = True if train_indicator else False
-    PRETRAIN_MANAGER = False
+    PRETRAIN_MANAGER = True if train_indicator else False
+    # PRETRAIN_MANAGER = False
     USE_PRETRAINED_MANAGER = False #  True if train_indicator else False
     USE_PRETRAINED_MODEL = False if train_indicator else True
     DATA_LOAD_STEP = 40000
@@ -437,8 +435,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         
         # Losses for TD3
         with tf.name_scope('pi_loss_hi'):
-            pi_loss_hi = -tf.reduce_mean(q1_pi_hi)
-            l2_loss_pi_hi = tf.losses.get_regularization_loss()
+            pi_loss_hi = -tf.reduce_mean(q1_pi_hi, name='pi_hi_main_loss')
+            l2_loss_pi_hi = tf.losses.get_regularization_loss(scope='manager/main/pi', name='pi_hi_reg_loss')
             pi_loss_hi += l2_loss_pi_hi # regularization loss for the actor
             pi_loss_hi += pi_reg_hi * reg_param['lam_mean'] # regularization loss for the actor
         with tf.name_scope('q_loss_hi'):
@@ -447,8 +445,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             q1_loss_hi = tf.losses.mean_squared_error(labels=q_backup_hi, predictions=q1_hi, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q2_loss_hi = tf.losses.mean_squared_error(labels=q_backup_hi, predictions=q2_hi, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q_loss_hi = q1_loss_hi + q2_loss_hi
-            l2_loss__q_hi = tf.losses.get_regularization_loss()
-            q_loss_hi += l2_loss__q_hi
+            l2_loss_q_hi = tf.losses.get_regularization_loss(scope='manager/main/q', name='q_hi_reg_loss')
+            q_loss_hi += l2_loss_q_hi
 
         # define training ops
         with tf.name_scope('optimize'):
@@ -478,8 +476,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         with tf.variable_scope('main'):
             # mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, pi_g, {'preact_reg':preact_reg, 'std_reg':std_reg}
             mu_lo, pi_lo, logp_pi_lo, q1_lo, q2_lo, q1_pi_lo, q2_pi_lo, _, reg_losses, state_infer, std_lo = controller_actor_critic(stt_ph, obs_ph, sg_ph, act_ph, aux_ph, action_space=None)
-            log_alpha_lo = tf.get_variable(name='log_alpha', initializer=-1.0, dtype=np.float32)
-            alpha_lo = tf.exp(log_alpha_lo) 
+            log_alpha_lo = tf.get_variable(name='log_alpha', initializer=0.0, dtype=np.float32)
+            alpha_lo = tf.exp(log_alpha_lo, name='alpha') 
 
         with tf.variable_scope('main', reuse=True): # re use the variable of q1 and q2
             _, pi_next_lo, logp_pi_next_lo, _, _, _, _, _, _, _, _ = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
@@ -489,37 +487,41 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # _, _, _, _, _, _, _, v_targ_lo, _, _  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
             _, _, _, q1_pi_lo_targ, q2_pi_lo_targ,  _, _,  _, _, _, _ = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, pi_next_lo, aux1_ph, action_space=None)
         with tf.name_scope('pi_loss_lo'):
-            # action prior
-            policy_prior = tf.contrib.distributions.MultivariateNormalDiag(
-                loc=tf.zeros(act_dim),
-                scale_diag=tf.ones(act_dim))
-            _ = policy_prior.log_prob(pi_lo)
-
-            min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
+            # action priorsc
+            min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo, name='min_q_pi_lo')
             # pi_loss_lo = tf.reduce_mean(alpha_lo * logcp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
-            pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - min_q_pi_lo ) # - policy_prior_log_probs # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
+            pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - min_q_pi_lo, name='pi_lo_main_loss') # - policy_prior_log_probs # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
+            print ('111111')
+            print (pi_loss_lo)
             # pi_l2_loss_lo = tf.losses.get_regularization_loss()
             # pi_loss_lo += pi_l2_loss_lo
             # pi_loss_lo += reg_losses # regularization losses for the actor
             pi_loss_lo += reg_losses['preact_mu'] * reg_param['lam_mean'] # regularization losses for the actor
+            print ('222222')
+            print (pi_loss_lo)
             pi_loss_lo += reg_losses['preact_std'] * reg_param['lam_std']
+            print ('333333')
+            print (pi_loss_lo)
             state_infer_loss_lo = tf.losses.mean_squared_error(labels=tf.concat([stt_ph, aux_ph], axis=-1), predictions=state_infer, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             pi_loss_lo += state_infer_loss_lo            
-            pi_l2_loss_lo = tf.losses.get_regularization_loss()
+            pi_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/pi', name='pi_reg_loss')
+            print ('444444')
+            print (pi_l2_loss_lo)
             pi_loss_lo += pi_l2_loss_lo
-            # pi_loss_lo += state_infer_loss_lo
+            print ('555555')
+            print (pi_loss_lo)
         with tf.name_scope('q_loss_lo'):
             # the original v ftn is not trained by minimizing the MSBE -> learned by the connection between Q and V
             # Legacy : min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
             # impl_targ_v_lo = min_q_pi_lo - alpha_lo * logp_pi_lo # implicit valfue ftn thru soft q-ftn
-            min_q_pi_lo_targ = tf.minimum(q1_pi_lo_targ, q2_pi_lo_targ)
+            min_q_pi_lo_targ = tf.minimum(q1_pi_lo_targ, q2_pi_lo_targ , name='min_q_pi_targ_lo')
             # logp_pi should be modified -> new_logp_pi is necesseary
             impl_targ_v_lo = min_q_pi_lo_targ - alpha_lo * logp_pi_next_lo
             q_backup_lo = tf.stop_gradient(rew_ph_lo + gamma*(1-dn_ph)*impl_targ_v_lo) 
             q1_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q1_lo, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q2_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q2_lo, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
-            q1_l2_loss_lo = tf.losses.get_regularization_loss()
-            q2_l2_loss_lo = tf.losses.get_regularization_loss()
+            q1_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/q1', name='q1_lo_reg_loss')
+            q2_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/q2', name='q2_lo_reg_loss')
             q1_loss_lo += q1_l2_loss_lo
             q2_loss_lo += q2_l2_loss_lo
 
@@ -963,12 +965,12 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         rospy.logwarn("Now trains the high-level controller for %d timesteps", ep_len)
         _man_buffer = buffer
         # execute off-policy correction before training
+        print ('Now we train manager with apply off-policy correction')
         for itr in tqdm(range(ep_len)):
             cur_step = step - int(ep_len * manager_propose_freq) + itr
             batch = _man_buffer.sample_batch(batch_size)
             # subgoal here is the action of manager network, action for computing log-likelihood
             # shape of corr_subgoals (batch_size, goal_dim)
-            print ('Now we apply off-policy correction')
             corr_subgoals = new_off_policy_correction(subgoals= batch['acts'],s_seq= batch['meas_st_seq'],
             o_seq= batch['ot_seq'], a_seq= batch['at_seq'])
             # action of the manager is subgoal...
