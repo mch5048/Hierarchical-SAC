@@ -441,10 +441,12 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             pi_loss_hi += pi_reg_hi * reg_param['lam_mean'] # regularization loss for the actor
         with tf.name_scope('q_loss_hi'):
             min_q_targ_hi = tf.minimum(q1_targ_hi, q2_targ_hi) # tensor
-            q_backup_hi = tf.stop_gradient(rew_ph_hi + gamma*(1-dn_ph)*min_q_targ_hi)
+            with tf.name_scope('q_hi_bellman_backup'):
+                q_backup_hi = tf.stop_gradient(rew_ph_hi + gamma*(1-dn_ph)*min_q_targ_hi)
             q1_loss_hi = tf.losses.mean_squared_error(labels=q_backup_hi, predictions=q1_hi, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q2_loss_hi = tf.losses.mean_squared_error(labels=q_backup_hi, predictions=q2_hi, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
-            q_loss_hi = q1_loss_hi + q2_loss_hi
+            with tf.name_scope('q_hi_total_loss'):
+                q_loss_hi = q1_loss_hi + q2_loss_hi
             l2_loss_q_hi = tf.losses.get_regularization_loss(scope='manager/main/q', name='q_hi_reg_loss')
             q_loss_hi += l2_loss_q_hi
 
@@ -491,33 +493,25 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo, name='min_q_pi_lo')
             # pi_loss_lo = tf.reduce_mean(alpha_lo * logcp_pi_lo - q1_pi_lo) # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
             pi_loss_lo = tf.reduce_mean(alpha_lo * logp_pi_lo - min_q_pi_lo, name='pi_lo_main_loss') # - policy_prior_log_probs # grad_ascent for E[q1_pi+ alpha*H] > maximize return && maximize entropy
-            print ('111111')
-            print (pi_loss_lo)
             # pi_l2_loss_lo = tf.losses.get_regularization_loss()
             # pi_loss_lo += pi_l2_loss_lo
             # pi_loss_lo += reg_losses # regularization losses for the actor
             pi_loss_lo += reg_losses['preact_mu'] * reg_param['lam_mean'] # regularization losses for the actor
-            print ('222222')
-            print (pi_loss_lo)
             pi_loss_lo += reg_losses['preact_std'] * reg_param['lam_std']
-            print ('333333')
-            print (pi_loss_lo)
             state_infer_loss_lo = tf.losses.mean_squared_error(labels=tf.concat([stt_ph, aux_ph], axis=-1), predictions=state_infer, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             pi_loss_lo += state_infer_loss_lo            
             pi_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/pi', name='pi_reg_loss')
-            print ('444444')
-            print (pi_l2_loss_lo)
             pi_loss_lo += pi_l2_loss_lo
-            print ('555555')
-            print (pi_loss_lo)
         with tf.name_scope('q_loss_lo'):
             # the original v ftn is not trained by minimizing the MSBE -> learned by the connection between Q and V
             # Legacy : min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
             # impl_targ_v_lo = min_q_pi_lo - alpha_lo * logp_pi_lo # implicit valfue ftn thru soft q-ftn
             min_q_pi_lo_targ = tf.minimum(q1_pi_lo_targ, q2_pi_lo_targ , name='min_q_pi_targ_lo')
             # logp_pi should be modified -> new_logp_pi is necesseary
-            impl_targ_v_lo = min_q_pi_lo_targ - alpha_lo * logp_pi_next_lo
-            q_backup_lo = tf.stop_gradient(rew_ph_lo + gamma*(1-dn_ph)*impl_targ_v_lo) 
+            with tf.name_scope('implicit_targ_value'):
+                impl_targ_v_lo = min_q_pi_lo_targ - alpha_lo * logp_pi_next_lo
+            with tf.name_scope('q_lo_bellman_backup'):
+                q_backup_lo = tf.stop_gradient(rew_ph_lo + gamma*(1-dn_ph)*impl_targ_v_lo) 
             q1_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q1_lo, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q2_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q2_lo, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q1_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/q1', name='q1_lo_reg_loss')
@@ -1246,7 +1240,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         timesteps_since_subgoal += 1
         next_obs, manager_reward, done = env.step(action, time_step=ep_len) # reward R_t-> for high-level manager -> for sum(R_t:t+c-1)
         if train_indicator:
-            randomize_world()
+            pass
+            # randomize_world()
         # update episodic logs
         # Ignore the "done" signal if it comes from hitting the time
         # horizon (that is, when it's an artificial terminal signal
