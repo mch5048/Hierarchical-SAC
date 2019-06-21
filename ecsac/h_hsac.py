@@ -328,7 +328,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     PRETRAIN_MANAGER = True if train_indicator else False
     PRETRAIN_CONTROLLER = True if train_indicator else False
     # PRETRAIN_MANAGER = False
-    USE_PRETRAINED_MANAGER = False #  True if train_indicator else False
+    USE_PRETRAINED_MANAGER = True #  True if train_indicator else False
     USE_PRETRAINED_CONTROLLER = False #  True if train_indicator else False
     USE_PRETRAINED_MODEL = False if train_indicator else True
     DATA_LOAD_STEP = 40000
@@ -1044,7 +1044,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                 rospy.logwarn("Pre-trains the low-level controller for %d timesteps", pretrain_steps)
                 _ctrl_demo_buffer = demo_buffer
                 idx = 0
-                for itr in tqdm(range(ep_len)):
+                for itr in tqdm(range(pretrain_steps)):
                     batch = _ctrl_demo_buffer.sample_batch(batch_size)
                     ctrl_feed_dict = {obs_ph: normalize_observation(c_obs=batch['ot']),
                                 obs1_ph: normalize_observation(c_obs=batch['ot1']),
@@ -1061,10 +1061,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                     q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
                     pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
                     # low_outs = sess.run(controller_ops + monitor_lo_ops, ctrl_feed_dict)
-                    _ = sess.run(q_ops +[ctrl_q1_summary, ctrl_q2_summary], ctrl_feed_dict)
+                    _ = sess.run(q_ops, ctrl_feed_dict)
                     # logging TODO :implement delayed updade of the low-level controller
                     if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
-                        _ = sess.run(pi_ops + [ctrl_pi_summary], ctrl_feed_dict)
+                        _ = sess.run(pi_ops, ctrl_feed_dict)
                     if (itr + 1)  % low_pretrain_save_freq == 0:
                         rospy.loginfo('##### saves controller_pretrain weights ##### for step %d', itr + 1)
                         saver.save(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac_pretrain_ct.ckpt', global_step=itr + 1)
