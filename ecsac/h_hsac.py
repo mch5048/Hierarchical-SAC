@@ -270,7 +270,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     gamma=0.99 # for both hi & lo level policies
     polyak=0.995 # tau = 0.005
     lr=1e-3 #for both actor
-    pi_lr=1e-4
+    pi_lr=5e-5
     vf_lr=1e-4 # for all the vf, and qfs
     alp_lr=1e-4 # for adjusting temperature
     batch_size=64
@@ -292,7 +292,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
     # coefs for nn ouput regularizers
     # NOTE : check if these parameters are crucial for low-level polic y
-    reg_param = {'lam_mean':1e-1, 'lam_std':1e-3}
+    reg_param = {'lam_mean':1e-3, 'lam_std':1e-3}
 
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
@@ -326,13 +326,18 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     # model save/load
     USE_DEMO = True if train_indicator else False
     PRETRAIN_MANAGER = True if train_indicator else False
+    PRETRAIN_CONTROLLER = True if train_indicator else False
     # PRETRAIN_MANAGER = False
     USE_PRETRAINED_MANAGER = False #  True if train_indicator else False
+    USE_PRETRAINED_CONTROLLER = False #  True if train_indicator else False
     USE_PRETRAINED_MODEL = False if train_indicator else True
     DATA_LOAD_STEP = 40000
     # high_pretrain_steps = int(4e4) 
-    high_pretrain_steps = int(2e4) 
+    high_pretrain_steps = int(4e4) 
     high_pretrain_save_freq = int(1e4)
+    low_pretrain_steps = int(4e4) 
+    low_pretrain_save_freq = int(1e4)
+
 
     IS_TRAIN = train_indicator
     USE_CARTESIAN = True
@@ -1002,7 +1007,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             new_saver = tf.train.import_meta_graph('/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
             new_saver.restore(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt-{0}'.format(DATA_LOAD_STEP))
         else:
-            rospy.logwarn("Pre-trains the high-level controller for %d timesteps", pretrain_steps)
+            rospy.logwarn("Pre-trains the high-level manager for %d timesteps", pretrain_steps)
             _demo_buffer = demo_buffer
             # execute off-policy correction before training
             for itr in tqdm(range(pretrain_steps)):
@@ -1026,7 +1031,46 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
                     rospy.loginfo('##### saves manager_pretrain weights ##### for step %d', itr + 1)
                     saver.save(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac_pretrain.ckpt', global_step=itr + 1)
                     saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac_pretrain.ckpt'), global_step=itr + 1)
-            
+
+    def pretrain_controller(demo_buffer, pretrain_steps, train_ops, batch_size=batch_size):
+            """ Pre-trains the controller actor-critic network with data collected from demonstartions.
+            TODO: check if tensorboard logging is valid here. 
+            """
+            if USE_PRETRAINED_CONTROLLER:
+                # os.chdir(catkin_path)
+                new_saver = tf.train.import_meta_graph('/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac_pretrain_ct.ckpt-{0}.meta'.format(DATA_LOAD_STEP))
+                new_saver.restore(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac_pretrain_ct.ckpt-{0}'.format(DATA_LOAD_STEP))
+            else:
+                rospy.logwarn("Pre-trains the low-level controller for %d timesteps", pretrain_steps)
+                _ctrl_demo_buffer = demo_buffer
+                idx = 0
+                for itr in tqdm(range(ep_len)):
+                    batch = _ctrl_demo_buffer.sample_batch(batch_size)
+                    ctrl_feed_dict = {obs_ph: normalize_observation(c_obs=batch['ot']),
+                                obs1_ph: normalize_observation(c_obs=batch['ot1']),
+                                stt_ph: normalize_observation(meas_stt=batch['st']),
+                                stt1_ph: normalize_observation(meas_stt=batch['st1']),
+                                act_ph: normalize_observation(act=batch['acts']),
+                                sg_ph : normalize_observation(meas_stt=batch['g']),
+                                sg1_ph : normalize_observation(meas_stt=batch['g1']),
+                                aux_ph : normalize_observation(aux_stt=batch['aux']),
+                                aux1_ph : normalize_observation(aux_stt=batch['aux1']),
+                                rew_ph_lo: (batch['rews']),
+                                dn_ph: batch['done'],
+                                }
+                    q_ops = train_ops['q_ops'] # [q1_hi, q2_hi, q1_loss_hi, q2_loss_hi, q_loss_hi, train_q_hi_op]
+                    pi_ops = train_ops['pi_ops'] # [pi_loss_hi, train_pi_hi_op, target_update_hi]
+                    # low_outs = sess.run(controller_ops + monitor_lo_ops, ctrl_feed_dict)
+                    _ = sess.run(q_ops +[ctrl_q1_summary, ctrl_q2_summary], ctrl_feed_dict)
+                    # logging TODO :implement delayed updade of the low-level controller
+                    if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
+                        _ = sess.run(pi_ops + [ctrl_pi_summary], ctrl_feed_dict)
+                    if (itr + 1)  % low_pretrain_save_freq == 0:
+                        rospy.loginfo('##### saves controller_pretrain weights ##### for step %d', itr + 1)
+                        saver.save(sess,'/home/irobot/catkin_ws/src/ddpg/scripts/ecsac/model/ecsac_pretrain_ct.ckpt', global_step=itr + 1)
+                        saver.save(sess, os.path.join(wandb.run.dir, '/model/ecsac_pretrain_ct.ckpt'), global_step=itr + 1)
+
+
     def normalize_observation(meas_stt=None, c_obs=None, aux_stt=None, act=None):
         """ normalizes observations for each step based on running mean-std.
         will only be used for each subgoal /action estimation from the manager/controller policy
@@ -1140,6 +1184,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     if PRETRAIN_MANAGER and train_indicator:
         pretrain_manager(demo_buffer=manager_buffer, pretrain_steps=high_pretrain_steps, train_ops=step_hi_ops)
 
+    if PRETRAIN_CONTROLLER and train_indicator:
+        pretrain_controller(demo_buffer=controller_buffer, pretrain_steps=low_pretrain_steps, train_ops=step_lo_ops)
+
     if noise_type == "normal":
         subgoal_noise = Gaussian(mu=np.zeros(sub_goal_dim), sigma=noise_stddev*np.ones(sub_goal_dim))
     else:
@@ -1231,7 +1278,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             action = sample_action(act_dim) # a_t
         else:
             action = get_action(c_obs, subgoal, deterministic= not train_indicator) # a_t
-            # action = get_action(c_obs, subgoal, deterministic= train_indicator) # a_t
+            # action = get_action(c_obs, subgoal, deferministic= train_indicator) # a_t
             # TODO: make action on the gripper as categorical policy
             # action[-1] = reloc_rescale_gripper(action[-1])
         ep_len += 1 # ep_len should be here!
@@ -1240,8 +1287,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         timesteps_since_subgoal += 1
         next_obs, manager_reward, done = env.step(action, time_step=ep_len) # reward R_t-> for high-level manager -> for sum(R_t:t+c-1)
         if train_indicator:
-            pass
-            # randomize_world()
+            randomize_world()
         # update episodic logs
         # Ignore the "done" signal if it comes from hitting the time
         # horizon (that is, when it's an artificial terminal signal
