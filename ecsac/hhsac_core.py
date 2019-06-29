@@ -1,11 +1,13 @@
 import numpy as np
 import tensorflow as tf
+import tensorflow.contrib.layers as tf_layers
 import rospy
 from collections import OrderedDict as od
 from state_action_space_h_hsac import *
 
 EPS = 1e-8
-CRIT_L2_REG = 1e-3
+CRIT_L2_REG = 1e-2
+ACT_L2_REG = 1e-2
 WEIGHT_SCALE = 1e-3
 init_scale=np.sqrt(2)
 xavier = tf.contrib.layers.xavier_initializer()
@@ -77,8 +79,8 @@ def placeholders(*args):
 
 def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None, kernel_regularizer=None, kernel_initializer=uniform):
     for h in hidden_sizes[:-1]:
-        x = (tf.layers.dense(x, units=h, activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer))
-    return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer)
+        x = tf_layers.layer_norm(tf.layers.dense(x, units=h, activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer))
+    return tf_layers.layer_norm(tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer))
 
 def cnn_feature_extractor(x, activation=tf.nn.relu, kernel_regularizer=None, kernel_initializer=uniform):
     x = tf.layers.conv2d(x, filters=16,kernel_size=5, strides=(3,3), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv1')
@@ -107,7 +109,7 @@ def clip_but_pass_gradient(x, l=-1., u=1.):
 Policies
 """
 
-LOG_STD_MAX = 0.5
+LOG_STD_MAX = 2
 LOG_STD_MIN = -20
 
 
@@ -166,7 +168,7 @@ def mlp_deterministic_policy(stt, sub_goal, activation=tf.nn.relu, hidden_sizes=
 
     return mu, net, batch_size
 
-def cnn_gaussian_policy_with_logits(obs, act, goal, meas_stt, aux_stt, activation=tf.nn.relu, output_activation=None, kernel_initializer=uniform):
+def cnn_gaussian_policy_with_logits(obs, act, goal, meas_stt, aux_stt, activation=tf.nn.relu, output_activation=None, kernel_initializer=uniform, kernel_regularizer=None):
     """ policy for low-level controller, SAC policy
     Note that the gripper is actuated by categorical policy.
     """
@@ -174,11 +176,11 @@ def cnn_gaussian_policy_with_logits(obs, act, goal, meas_stt, aux_stt, activatio
     act_dim = act.shape.as_list()[-1]
     full_stt_dim = meas_stt.shape.as_list()[-1] + aux_stt.shape.as_list()[-1]
     _feat = cnn_feature_extractor(obs, activation)
-    state_infer = tf.layers.dense(_feat, units=full_stt_dim, activation=None, kernel_initializer=kernel_initializer)
+    state_infer = tf.layers.dense(_feat, units=full_stt_dim, activation=None, kernel_initializer=kernel_initializer, kernel_regularizer=kernel_regularizer)
     _feat = tf.concat([_feat, goal], axis=-1)
-    _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=kernel_initializer)
-    _feat = tf.layers.dense(_feat, units=100, activation=activation, kernel_initializer=kernel_initializer)
-    _feat = tf.layers.dense(_feat, units=100, activation=activation, kernel_initializer=kernel_initializer)
+    _feat = tf_layers.layer_norm(tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=kernel_initializer, kernel_regularizer=kernel_regularizer))
+    _feat = tf_layers.layer_norm(tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=kernel_initializer, kernel_regularizer=kernel_regularizer))
+    # _feat = tf.layers.dense(_feat, units=100, activation=activation, kernel_initializer=kernel_initializer, kernel_regularizer=None)
     # logit action for controlling gripper (on/off)
     logits = tf.layers.dense(_feat, units=grip_dim, activation=activation, kernel_initializer=kernel_initializer)
     logp_g_all = tf.nn.log_softmax(logits)
@@ -186,33 +188,34 @@ def cnn_gaussian_policy_with_logits(obs, act, goal, meas_stt, aux_stt, activatio
     pi_g = tf.multinomial(logits,1)
     pi_g_f = tf.cast(pi_g, tf.float32)
     logp_pi_g = tf.reduce_sum(tf.one_hot(pi_g, depth=grip_dim) * logp_g_all, axis=1)
-
     mu = tf.layers.dense(_feat, units=act_dim - 1, activation=output_activation, kernel_initializer=kernel_initializer)
-    mu = mu * a_scale[:-1] + a_mean[:-1]
-    mu = tf.minimum(a_high[:-1], tf.maximum(a_low[:-1], mu))
-    log_std = tf.layers.dense(_feat, act_dim - 1, activation=tf.tanh)
+    # log_std = tf.layers.dense(_feat, act_dim - 1, activation=tf.tanh)
+
+    _log_std = tf.layers.dense(_feat, act_dim - 1, activation=None) # add pre-activation loss for log_std
+    log_std = tf.tanh(_log_std)
     log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1) #Squash & rescale log_std
     std = tf.exp(log_std) # retrieve std
-    pi = mu + tf.random_normal(tf.shape(mu)) * std
-    pi = tf.minimum(a_high[:-1], tf.maximum(a_low[:-1], pi))
+    pi = mu + tf.random_normal(tf.shape(mu)) * std    
     logp_pi = gaussian_likelihood(pi, mu, log_std)
 
-    return mu, pi, logp_pi, std, pi_g_f, logp_pi_g, state_infer, std
+    return mu, pi, logp_pi, std, pi_g_f, logp_pi_g, state_infer, _log_std
 
-def cnn_gaussian_policy(obs, act, goal, activation=tf.nn.relu, output_activation=None):
+def cnn_gaussian_policy(obs, act, goal, activation=tf.nn.leaky_relu, output_activation=None):
     """ policy for low-level controller, SAC policy
     """
     act_dim = act.shape.as_list()[-1]
-    log_alpha = tf.get_variable(name='log_alpha', initializer=-0.5, dtype=np.float32)
+    log_alpha = tf.get_variable(name='log_alpha', initializer=-1, dtype=np.float32)
     _feat = cnn_feature_extractor(obs, activation)
     _feat = tf.concat([_feat, goal], axis=-1)
-    _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=uniform)
-    _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=uniform)
+    _feat = tf.layers.dense(_feat, units=200, activation=activation, kernel_initializer=ortho)
+    _feat = tf.layers.dense(_feat, units=200, activation=activation, kernel_initializer=ortho)
     # logit action for controlling gripper (on/off)
     
     mu = tf.layers.dense(_feat, act_dim, activation=output_activation)
     mu = mu * a_scale + a_mean
     mu = tf.minimum(a_high, tf.maximum(a_low, mu))
+    _log_std = tf.layers.dense(_feat, act_dim, activation=None)
+    log_std = tf.tanh(_log_std)
     log_std = tf.layers.dense(_feat, act_dim, activation=tf.tanh)
     log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1) #Squash & rescale log_std
     std = tf.exp(log_std) # retrieve std
@@ -236,7 +239,7 @@ Actor-Critics for manager class : mu_hi, deterministic policy
 """
 
 
-def mlp_manager_actor_critic(meas_stt, sub_goal, aux_stt, action_space=None, hidden_sizes=(200,200,200), activation=tf.nn.relu, 
+def mlp_manager_actor_critic(meas_stt, sub_goal, aux_stt, action_space=None, hidden_sizes=(300, 300), activation=tf.nn.relu, 
                      output_activation=tf.tanh, policy=mlp_deterministic_policy):
     """ actor-critic for TD3
         args: 
@@ -247,14 +250,16 @@ def mlp_manager_actor_critic(meas_stt, sub_goal, aux_stt, action_space=None, hid
                       joint_p=joint_p, joint_v=joint_v, joint_e=joint_e)       
     """
     kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=CRIT_L2_REG)
+    kernel_regularizer_act = tf.contrib.layers.l2_regularizer(scale=ACT_L2_REG)
+
 
     # policy
     with tf.variable_scope('pi'): # '/manager/main/pi/' , high-level policy only receives measured states!
         mu, _pre_act, _ = policy(meas_stt, sub_goal, activation=activation, hidden_sizes=hidden_sizes,
-                            output_activation=output_activation, kernel_initializer=uniform, kernel_regularizer=kernel_regularizer)
+                            output_activation=output_activation, kernel_initializer=ortho, kernel_regularizer=kernel_regularizer_act)
 
     # policy reg losses
-    preact_reg = tf.norm(_pre_act) 
+    preact_reg = tf.norm(_pre_act, name='preact_mu_hi') 
 
     # make sure actions are in correct range
     mu = mu * s_scale + s_mean
@@ -276,20 +281,30 @@ def mlp_manager_actor_critic(meas_stt, sub_goal, aux_stt, action_space=None, hid
 Actor-Critics for controller class : mu_lo, stochastic policy
 """
 
-def cnn_controller_actor_critic(meas_stt, obs, goal, act, aux_stt, action_space=None, hidden_sizes=(300, 300, 300), activation=tf.nn.leaky_relu, 
+def cnn_controller_actor_critic(meas_stt, obs, goal, act, aux_stt, action_space=None, hidden_sizes=(256, 256, 256), activation=tf.nn.leaky_relu, 
                     output_activation=None, policy=cnn_gaussian_policy_with_logits):
     """ Define actor-critic for controller policy ; actor: cnn critic: mlp
     """
     kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=CRIT_L2_REG)
+    kernel_regularizer_act = tf.contrib.layers.l2_regularizer(scale=ACT_L2_REG)
+
     # policy
     with tf.variable_scope('pi'):
-        _mu, _pi, _logp_pi, std, pi_g, _, state_infer, std = policy(obs, act, goal, meas_stt, aux_stt, activation, output_activation, kernel_initializer=uniform)
+        _mu, _pi, _logp_pi, std, pi_g, _, state_infer, _log_std = policy(obs, act, goal, meas_stt, aux_stt, activation, output_activation, kernel_initializer=uniform, kernel_regularizer=kernel_regularizer_act)
         # poliy reg losses 
-        preact_reg = tf.norm(_mu)
-        std_reg = tf.norm(std)
+        preact_mu = tf.norm(_mu, name='preact_mu')
+        preact_std = tf.norm(_log_std, name='preact_std')
         _mu, _pi, logp_pi = apply_squashing_func(_mu, _pi, _logp_pi)
-        mu = tf.concat([_mu, pi_g], axis=-1)
-        pi = tf.concat([_pi, pi_g], axis=-1)
+
+        # reloc & rescale the policy output 
+        _mu = _mu * a_scale[:-1] + a_mean[:-1]
+        _mu = tf.minimum(a_high[:-1], tf.maximum(a_low[:-1], _mu), name='mu_normalize')
+
+        _pi = _pi * a_scale[:-1] + a_mean[:-1]
+        _pi = tf.minimum(a_high[:-1], tf.maximum(a_low[:-1], _pi), name='pi_normalize')
+
+        mu = tf.concat([_mu, pi_g], axis=-1, name='mu_concat_grip')
+        pi = tf.concat([_pi, pi_g], axis=-1, name='pi_concat_grip')
 
 
     # value ftns
@@ -303,7 +318,8 @@ def cnn_controller_actor_critic(meas_stt, obs, goal, act, aux_stt, action_space=
     with tf.variable_scope('q2', reuse=True):
         q2_pi = vf_mlp(tf.concat([meas_stt, aux_stt, goal, pi], axis=-1))
 
-    return mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, pi_g, {'preact_reg':preact_reg, 'std_reg':std_reg}, state_infer, std
+    return mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, pi_g, {'preact_mu':preact_mu, 'preact_std':preact_std}, state_infer, std
+    # return mu, pi, logp_pi, q1, q2, q1_pi, q2_pi, pi_g, preact_reg, state_infer, std
 
 
 # def cnn_controller_actor_critic(stt, obs, goal, act, aux, action_space=None, hidden_sizes=(512,256,256), activation=tf.nn.relu, 
