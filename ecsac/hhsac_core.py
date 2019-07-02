@@ -13,6 +13,8 @@ init_scale=np.sqrt(2)
 xavier = tf.contrib.layers.xavier_initializer()
 ortho = tf.keras.initializers.Orthogonal(init_scale, seed=0)
 uniform = tf.initializers.random_uniform(minval=-WEIGHT_SCALE, maxval=WEIGHT_SCALE)
+layer_norm = tf.contrib.layers.layer_norm   
+
 def ortho_init(scale=1.0):
     """
     Orthogonal initialization for the policy weights
@@ -77,11 +79,15 @@ def placeholders(*args):
 #     return input_tensor
 
 
-def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None, kernel_regularizer=None, kernel_initializer=uniform):
+def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None, kernel_regularizer=None, kernel_initializer=uniform, l_norm=False):
     for h in hidden_sizes[:-1]:
-        x = tf_layers.layer_norm(tf.layers.dense(x, units=h, activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer))
-    return tf_layers.layer_norm(tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer))
-
+        x = tf.layers.dense(x, units=h, activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer)
+        if l_norm:
+            x = layer_norm(x)
+    if not layer_norm:
+        return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer)
+    else:
+        return layer_norm(tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer))
 def cnn_feature_extractor(x, activation=tf.nn.relu, kernel_regularizer=None, kernel_initializer=uniform):
     x = tf.layers.conv2d(x, filters=16,kernel_size=5, strides=(3,3), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv1')
     x = tf.layers.conv2d(x, filters=32,kernel_size=3, strides=(2,2), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, name='actor_conv2')
@@ -163,12 +169,12 @@ def mlp_deterministic_policy(stt, sub_goal, activation=tf.nn.relu, hidden_sizes=
     """
     batch_size = sub_goal.shape.as_list()[0]
     sg_dim = sub_goal.shape.as_list()[-1]
-    net = mlp(stt, list(hidden_sizes), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer)
+    net = mlp(stt, list(hidden_sizes), activation=activation, kernel_regularizer=kernel_regularizer, kernel_initializer=kernel_initializer, l_norm=True)
     mu = tf.layers.dense(net, sg_dim, activation=output_activation, kernel_initializer=kernel_initializer)
 
     return mu, net, batch_size
 
-def cnn_gaussian_policy_with_logits(obs, act, goal, meas_stt, aux_stt, activation=tf.nn.relu, output_activation=None, kernel_initializer=uniform, kernel_regularizer=None):
+def cnn_gaussian_policy_with_logits(obs, act, goal, meas_stt, aux_stt, activation=tf.nn.relu, output_activation=None, kernel_initializer=uniform, kernel_regularizer=None, l_norm=False):
     """ policy for low-level controller, SAC policy
     Note that the gripper is actuated by categorical policy.
     """
@@ -178,8 +184,12 @@ def cnn_gaussian_policy_with_logits(obs, act, goal, meas_stt, aux_stt, activatio
     _feat = cnn_feature_extractor(obs, activation)
     state_infer = tf.layers.dense(_feat, units=full_stt_dim, activation=None, kernel_initializer=kernel_initializer, kernel_regularizer=kernel_regularizer)
     _feat = tf.concat([_feat, goal], axis=-1)
-    _feat = tf_layers.layer_norm(tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=kernel_initializer, kernel_regularizer=kernel_regularizer))
-    _feat = tf_layers.layer_norm(tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=kernel_initializer, kernel_regularizer=kernel_regularizer))
+    _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=kernel_initializer, kernel_regularizer=kernel_regularizer)
+    if l_norm:
+        _feat = layer_norm(_feat)
+    _feat = tf.layers.dense(_feat, units=256, activation=activation, kernel_initializer=kernel_initializer, kernel_regularizer=kernel_regularizer)
+    if l_norm:
+        _feat = layer_norm(_feat)
     # _feat = tf.layers.dense(_feat, units=100, activation=activation, kernel_initializer=kernel_initializer, kernel_regularizer=None)
     # logit action for controlling gripper (on/off)
     logits = tf.layers.dense(_feat, units=grip_dim, activation=activation, kernel_initializer=kernel_initializer)
@@ -282,7 +292,7 @@ Actor-Critics for controller class : mu_lo, stochastic policy
 """
 
 def cnn_controller_actor_critic(meas_stt, obs, goal, act, aux_stt, action_space=None, hidden_sizes=(256, 256, 256), activation=tf.nn.leaky_relu, 
-                    output_activation=None, policy=cnn_gaussian_policy_with_logits):
+                    output_activation=None, policy=cnn_gaussian_policy_with_logits, l_norm=True):
     """ Define actor-critic for controller policy ; actor: cnn critic: mlp
     """
     kernel_regularizer = tf.contrib.layers.l2_regularizer(scale=CRIT_L2_REG)

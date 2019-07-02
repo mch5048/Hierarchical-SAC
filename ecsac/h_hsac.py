@@ -269,11 +269,11 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     save_freq = 2e3 # every 2000 steps (2 epochs)
     gamma=0.99 # for both hi & lo level policies
     polyak=0.995 # tau = 0.005
-    lr=1e-3 #for both actor
-    pi_lr=5e-5
-    vf_lr=1e-4 # for all the vf, and qfs
-    alp_lr=1e-4 # for adjusting temperature
-    batch_size=64
+    lr=3e-4 #for both actor
+    pi_lr=3e-4
+    vf_lr=3e-4 # for all the vf, and qfs
+    alp_lr=3e-4 # for adjusting temperature
+    batch_size=128
     start_steps=5000
     max_ep_len=1000
 
@@ -281,18 +281,19 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     noise_idx = 1 # 0: ou 1: normal
     noise_type = "normal" if noise_idx else "ou"
     noise_stddev = 0.25
-    manager_noise = 0.05 # for target policy smoothing.
+    manager_noise = 0.02 # for target policy smoothing.
     manager_noise_clip = 0.3 # for target policy smoothing.
     man_replay_size = int(5e4) # Memory leakage?
-    delayed_update_freq = 3
+    delayed_update_freq = 2
     #controller sac
     ctrl_replay_size = int(5e4) # Memory leakage?
-    target_ent = 0.01 # learnable entropy
+    # target_ent = 0.01 # learnable entropy
+    target_ent = float(-np.prod((8,))) # learnable entropy
     reward_scale_lo = 1.0
 
     # coefs for nn ouput regularizers
     # NOTE : check if these parameters are crucial for low-level polic y
-    reg_param = {'lam_mean':1e-3, 'lam_std':1e-3}
+    reg_param = {'lam_mean':1e-1, 'lam_std':1e-2}
 
     # high-level manager pre-train params
     # train high-level policy for its mlp can infer joint states
@@ -325,17 +326,18 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
     # model save/load
     USE_DEMO = True if train_indicator else False
-    PRETRAIN_MANAGER = True if train_indicator else False
-    PRETRAIN_CONTROLLER = True if train_indicator else False
-    # PRETRAIN_MANAGER = False
-    USE_PRETRAINED_MANAGER = True #  True if train_indicator else False
+    # PRETRAIN_MANAGER = True if train_indicator else False
+    # PRETRAIN_CONTROLLER = True if train_indicator else False
+    PRETRAIN_MANAGER = True
+    PRETRAIN_CONTROLLER = True
+    USE_PRETRAINED_MANAGER = False #  True if train_indicator else False
     USE_PRETRAINED_CONTROLLER = False #  True if train_indicator else False
     USE_PRETRAINED_MODEL = False if train_indicator else True
     DATA_LOAD_STEP = 40000
     # high_pretrain_steps = int(4e4) 
     high_pretrain_steps = int(4e4) 
     high_pretrain_save_freq = int(1e4)
-    low_pretrain_steps = int(4e4) 
+    low_pretrain_steps = int(2e4) 
     low_pretrain_save_freq = int(1e4)
 
 
@@ -441,8 +443,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # Losses for TD3
         with tf.name_scope('pi_loss_hi'):
             pi_loss_hi = -tf.reduce_mean(q1_pi_hi, name='pi_hi_main_loss')
-            l2_loss_pi_hi = tf.losses.get_regularization_loss(scope='manager/main/pi', name='pi_hi_reg_loss')
-            pi_loss_hi += l2_loss_pi_hi # regularization loss for the actor
+            # l2_loss_pi_hi = tf.losses.get_regularization_loss(scope='manager/main/pi', name='pi_hi_reg_loss')
+            # pi_loss_hi += l2_loss_pi_hi # regularization loss for the actor
             pi_loss_hi += pi_reg_hi * reg_param['lam_mean'] # regularization loss for the actor
         with tf.name_scope('q_loss_hi'):
             min_q_targ_hi = tf.minimum(q1_targ_hi, q2_targ_hi) # tensor
@@ -471,8 +473,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
 
             with tf.control_dependencies([train_q_hi_op]): # train_qfs 
                 with tf.name_scope('polyak_hi_update'):
-                    target_update_hi = tf.group([tf.assign(v_targ, polyak*v_targ + (1-polyak)*v_main)
-                                            for v_main, v_targ in zip(get_vars('manager/main'), get_vars('manager/target'))])
+                    target_update_hi = tf.group([tf.assign(v_targ_hi, polyak*v_targ_hi + (1-polyak)*v_main_hi)
+                                            for v_main_hi, v_targ_hi in zip(get_vars('manager/main'), get_vars('manager/target'))])
         # create manager summaries
         man_pi_summary = tf.summary.merge_all(scope='manager/optimize/pi_hi_opt', name='manager_pi_sumamry')
         man_q_summary = tf.summary.merge_all(scope='manager/optimize/q_hi_opt', name='manager_q_sumamry')
@@ -501,12 +503,12 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # pi_l2_loss_lo = tf.losses.get_regularization_loss()
             # pi_loss_lo += pi_l2_loss_lo
             # pi_loss_lo += reg_losses # regularization losses for the actor
-            pi_loss_lo += reg_losses['preact_mu'] * reg_param['lam_mean'] # regularization losses for the actor
-            pi_loss_lo += reg_losses['preact_std'] * reg_param['lam_std']
+            # pi_loss_lo += reg_losses['preact_mu'] * reg_param['lam_mean'] # regularization losses for the actor
+            # pi_loss_lo += reg_losses['preact_std'] * reg_param['lam_std']
             state_infer_loss_lo = tf.losses.mean_squared_error(labels=tf.concat([stt_ph, aux_ph], axis=-1), predictions=state_infer, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             pi_loss_lo += state_infer_loss_lo            
-            pi_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/pi', name='pi_reg_loss')
-            pi_loss_lo += pi_l2_loss_lo
+            # pi_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/pi', name='pi_reg_loss')
+            # pi_loss_lo += pi_l2_loss_lo
         with tf.name_scope('q_loss_lo'):
             # the original v ftn is not trained by minimizing the MSBE -> learned by the connection between Q and V
             # Legacy : min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
@@ -525,7 +527,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             q2_loss_lo += q2_l2_loss_lo
 
         with tf.name_scope('alpha_loss_lo'):
-            alpha_loss_lo = -tf.reduce_mean(alpha_lo*tf.stop_gradient(logp_pi_lo + target_ent)) # -alpha * log_p_pi - alpha * target_ent
+            alpha_loss_lo = -tf.reduce_mean(log_alpha_lo*tf.stop_gradient(logp_pi_lo + target_ent)) # -alpha * log_p_pi - alpha * target_ent
 
         with tf.name_scope('optimize'):
             pi_lo_optimizer = tf.train.AdamOptimizer(learning_rate=pi_lr, name='pi_lo_optimizer')
@@ -553,8 +555,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # Polyak averaging for target variables
             # (control flow because sess.run otherwise evaluates in nondeterministic order)
             with tf.control_dependencies([train_q_lo_op]): # train_qfs 
-                target_update_lo = tf.group([tf.assign(v_targ, polyak*v_targ + (1-polyak)*v_main)
-                                        for v_main, v_targ in zip(get_vars('controller/main'), get_vars('controller/target'))])
+                target_update_lo = tf.group([tf.assign(v_targ_lo, polyak*v_targ_lo + (1-polyak)*v_main_lo)
+                                        for v_main_lo, v_targ_lo in zip(get_vars('controller/main'), get_vars('controller/target'))])
 
         # create controller summaries
         ctrl_pi_summary = tf.summary.merge_all(scope='controller/optimize/pi_lo_opt')
@@ -745,8 +747,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # low_outs = sess.run(controller_ops + monitor_lo_ops, ctrl_feed_dict)
             q_lo_outs = sess.run(q_ops +[ctrl_q1_summary, ctrl_q2_summary], ctrl_feed_dict)
             # logging TODO :implement delayed updade of the low-level controller
-            if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
-                pi_lo_outs = sess.run(pi_ops + [ctrl_pi_summary], ctrl_feed_dict)
+            # if itr % delayed_update_freq == 0: # delayed update of the policy and target nets.
+            pi_lo_outs = sess.run(pi_ops + [ctrl_pi_summary], ctrl_feed_dict)
                 # summary_writer.add_summary(pi_hi_outs[-1] , cur_step) # low-pi summary
                 # wandb.log({'policy_loss_lo': pi_lo_outs[0], 'entropy_lo': -np.mean(pi_lo_outs[1]), 'alpha': pi_lo_outs[-2]})   
             # if itr % 10 == 0:
@@ -1177,7 +1179,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             rospy.logwarn('Loading demo batch on the controller buffer. May take a while...')
             _controller_batch = pickle.load(f2)
             controller_buffer.store_demo_transition(_controller_batch)
-        load_demo_rms()
+        # load_demo_rms()
         rospy.loginfo('Successfully loaded demo transitions on the buffers!')
 
     # back to catkin_ws to resolve directory conflict issue
