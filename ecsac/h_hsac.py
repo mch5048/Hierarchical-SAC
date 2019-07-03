@@ -405,9 +405,9 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         act_ph = tf.placeholder(dtype=tf.float32, shape=(None, act_dim)) # a_t : for low_level a-c
         aux_ph = tf.placeholder(dtype=tf.float32, shape=(None, aux_dim)) # only fed into the critic -> auxiliary states (ee_pose + measured_states )
         aux1_ph = tf.placeholder(dtype=tf.float32, shape=(None, aux_dim)) # only fed into the critic -> auxiliary states
-        rew_ph_lo = tf.placeholder(dtype=tf.float32, shape=(None)) # r_t(s,g,a,s') = -1*l2_norm(s+g-s') : given by high-level policy
-        rew_ph_hi = tf.placeholder(dtype=tf.float32, shape=(None)) # R_t = sparse (1 if suc else 0): given by the env.
-        dn_ph = tf.placeholder(dtype=tf.float32, shape=(None)) # if episode is done : given by env.
+        rew_ph_lo = tf.placeholder(dtype=tf.float32, shape=(None,)) # r_t(s,g,a,s') = -1*l2_norm(s+g-s') : given by high-level policy
+        rew_ph_hi = tf.placeholder(dtype=tf.float32, shape=(None,)) # R_t = sparse (1 if suc else 0): given by the env.
+        dn_ph = tf.placeholder(dtype=tf.float32, shape=(None,)) # if episode is done : given by env.
     rospy.loginfo("placeholder have been created")
 
     # her_sampler = Her_sampler(reward_func=env.compute_reward_from_goal)
@@ -446,6 +446,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # l2_loss_pi_hi = tf.losses.get_regularization_loss(scope='manager/main/pi', name='pi_hi_reg_loss')
             # pi_loss_hi += l2_loss_pi_hi # regularization loss for the actor
             pi_loss_hi += pi_reg_hi * reg_param['lam_mean'] # regularization loss for the actor
+
         with tf.name_scope('q_loss_hi'):
             min_q_targ_hi = tf.minimum(q1_targ_hi, q2_targ_hi) # tensor
             with tf.name_scope('q_hi_bellman_backup'):
@@ -495,6 +496,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         with tf.variable_scope('target'):
             # _, _, _, _, _, _, _, v_targ_lo, _, _  = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, act_ph, aux1_ph, action_space=None)
             _, _, _, q1_pi_lo_targ, q2_pi_lo_targ,  _, _,  _, _, _, _ = controller_actor_critic(stt1_ph, obs1_ph, sg1_ph, pi_next_lo, aux1_ph, action_space=None)
+        
         with tf.name_scope('pi_loss_lo'):
             # action priorsc
             min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo, name='min_q_pi_lo')
@@ -503,9 +505,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # pi_l2_loss_lo = tf.losses.get_regularization_loss()
             # pi_loss_lo += pi_l2_loss_lo
             # pi_loss_lo += reg_losses # regularization losses for the actor
-            # pi_loss_lo += reg_losses['preact_mu'] * reg_param['lam_mean'] # regularization losses for the actor
-            # pi_loss_lo += reg_losses['preact_std'] * reg_param['lam_std']
+            pi_loss_lo += reg_losses['preact_mu'] * reg_param['lam_mean'] # regularization losses for the actor
+            pi_loss_lo += reg_losses['preact_std'] * reg_param['lam_std']
             state_infer_loss_lo = tf.losses.mean_squared_error(labels=tf.concat([stt_ph, aux_ph], axis=-1), predictions=state_infer, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
+
             pi_loss_lo += state_infer_loss_lo            
             # pi_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/pi', name='pi_reg_loss')
             # pi_loss_lo += pi_l2_loss_lo
@@ -517,8 +520,10 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             # logp_pi should be modified -> new_logp_pi is necesseary
             with tf.name_scope('implicit_targ_value'):
                 impl_targ_v_lo = min_q_pi_lo_targ - alpha_lo * logp_pi_next_lo
+            
             with tf.name_scope('q_lo_bellman_backup'):
-                q_backup_lo = tf.stop_gradient(rew_ph_lo + gamma*(1-dn_ph)*impl_targ_v_lo) 
+                q_backup_lo = tf.stop_gradient(rew_ph_lo + gamma*(1-dn_ph)*impl_targ_v_lo)
+
             q1_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q1_lo, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q2_loss_lo = tf.losses.mean_squared_error(labels=q_backup_lo, predictions=q2_lo, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
             q1_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/q1', name='q1_lo_reg_loss')
