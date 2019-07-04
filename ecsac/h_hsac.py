@@ -289,6 +289,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
     ctrl_replay_size = int(5e4) # Memory leakage?
     # target_ent = 0.01 # learnable entropy
     target_ent = float(-np.prod((8,))) # learnable entropy
+    target_ent = 0.1 # learnable entropy
     reward_scale_lo = 1.0
 
     # coefs for nn ouput regularizers
@@ -443,8 +444,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # Losses for TD3
         with tf.name_scope('pi_loss_hi'):
             pi_loss_hi = -tf.reduce_mean(q1_pi_hi, name='pi_hi_main_loss')
-            # l2_loss_pi_hi = tf.losses.get_regularization_loss(scope='manager/main/pi', name='pi_hi_reg_loss')
-            # pi_loss_hi += l2_loss_pi_hi # regularization loss for the actor
+            l2_loss_pi_hi = tf.losses.get_regularization_loss(scope='manager/main/pi', name='pi_hi_reg_loss')
+            pi_loss_hi += l2_loss_pi_hi # regularization loss for the actor
             pi_loss_hi += pi_reg_hi * reg_param['lam_mean'] # regularization loss for the actor
 
         with tf.name_scope('q_loss_hi'):
@@ -510,8 +511,8 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
             state_infer_loss_lo = tf.losses.mean_squared_error(labels=tf.concat([stt_ph, aux_ph], axis=-1), predictions=state_infer, weights=0.5, reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
 
             pi_loss_lo += state_infer_loss_lo            
-            # pi_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/pi', name='pi_reg_loss')
-            # pi_loss_lo += pi_l2_loss_lo
+            pi_l2_loss_lo = tf.losses.get_regularization_loss(scope='controller/main/pi', name='pi_reg_loss')
+            pi_loss_lo += pi_l2_loss_lo
         with tf.name_scope('q_loss_lo'):
             # the original v ftn is not trained by minimizing the MSBE -> learned by the connection between Q and V
             # Legacy : min_q_pi_lo = tf.minimum(q1_pi_lo, q2_pi_lo)
@@ -1301,7 +1302,7 @@ def ecsac(train_indicator, isReal=False,logger_kwargs=dict()):
         # that isn't based on the agent's state) -> if done = False for the max_timestep
         # DO NOT Make done = True when it hits timeout
         ep_ret += manager_reward # reward in terms of achieving episodic task
-        done = False if ep_len== max_ep_len else done
+        done = False if ep_len == max_ep_len else done
         if done:
             rospy.logwarn('=============== Now epsiode %d ends with done signal! ====================', episode_num)
         next_meas_stt = np.concatenate(next_obs['observation']['meas_state'], axis=0) # s_t
